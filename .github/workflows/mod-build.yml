@@ -166,12 +166,6 @@ jobs:
             --cache-dir "${{ env.WWISE_CACHE }}"
           if ($LASTEXITCODE -ne 0) { Write-Error "wwise-cli integrate-ue failed" }
 
-      - name: Generate project files
-        shell: pwsh
-        run: |
-          & "${{ env.UE_ROOT }}\Engine\Build\BatchFiles\GenerateProjectFiles.bat" `
-            -project="$PWD\SatisfactoryModLoader\FactoryGame.uproject" -game
-
       - name: Build editor binaries
         shell: pwsh
         run: |
