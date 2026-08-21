@@ -65,11 +65,35 @@ jobs:
           if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
           Copy-Item -Recurse satisfacto-form\mod $dest
 
+      - name: Preflight (secrets + tools)
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.ENGINE_GH_TOKEN }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ([string]::IsNullOrEmpty($env:GH_TOKEN)) {
+            Write-Error "Repo secret ENGINE_GH_TOKEN is not set (or empty). See docs/mod-ci.md."
+          }
+          gh auth status 2>&1 | Out-Host
+          # winget installs 7-Zip without adding it to PATH; resolve it explicitly.
+          $sevenZip = (Get-Command 7z -ErrorAction SilentlyContinue).Source
+          if (-not $sevenZip) {
+            foreach ($candidate in @("$env:ProgramFiles\7-Zip\7z.exe", "${env:ProgramFiles(x86)}\7-Zip\7z.exe")) {
+              if (Test-Path $candidate) { $sevenZip = $candidate; break }
+            }
+          }
+          if (-not $sevenZip) {
+            Write-Error "7z.exe not found on PATH or in Program Files. Install 7-Zip on the runner."
+          }
+          Write-Host "Using 7-Zip at: $sevenZip"
+          "SEVEN_ZIP=$sevenZip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: Install custom engine (cached on runner disk)
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.ENGINE_GH_TOKEN }}
         run: |
+          $ErrorActionPreference = "Stop"
           if (Test-Path "${{ env.UE_ROOT }}\Engine\Build\BatchFiles\Build.bat") {
             Write-Host "Engine already present at ${{ env.UE_ROOT }}, skipping download."
             exit 0
@@ -80,7 +104,11 @@ jobs:
           # The release ships as split 7z parts: UnrealEngine-CSS-Editor-Win64.7z.001 ...
           gh release download @tagArgs --repo satisfactorymodding/UnrealEngine `
             --pattern "UnrealEngine-CSS-Editor-Win64.7z*" --dir "${{ env.UE_ROOT }}\_dl"
-          7z x "${{ env.UE_ROOT }}\_dl\UnrealEngine-CSS-Editor-Win64.7z.001" -o"${{ env.UE_ROOT }}" -y
+          if ($LASTEXITCODE -ne 0) { Write-Error "gh release download failed (check ENGINE_GH_TOKEN access to satisfactorymodding/UnrealEngine)" }
+          $firstPart = Get-ChildItem "${{ env.UE_ROOT }}\_dl" -Filter "*.7z.001" | Select-Object -First 1
+          if (-not $firstPart) { Write-Error "No .7z.001 part downloaded - release asset layout may have changed; list assets with: gh release view --repo satisfactorymodding/UnrealEngine" }
+          & $env:SEVEN_ZIP x $firstPart.FullName -o"${{ env.UE_ROOT }}" -y
+          if ($LASTEXITCODE -ne 0) { Write-Error "7z extraction failed" }
           Remove-Item -Recurse -Force "${{ env.UE_ROOT }}\_dl"
           # Register the engine build + install prerequisites (script name has
           # moved between releases; run whichever exists).
@@ -92,7 +120,12 @@ jobs:
         env:
           WWISE_EMAIL: ${{ secrets.WWISE_EMAIL }}
           WWISE_PASSWORD: ${{ secrets.WWISE_PASSWORD }}
+          GH_TOKEN: ${{ secrets.ENGINE_GH_TOKEN }}
         run: |
+          $ErrorActionPreference = "Stop"
+          if ([string]::IsNullOrEmpty($env:WWISE_EMAIL) -or [string]::IsNullOrEmpty($env:WWISE_PASSWORD)) {
+            Write-Error "Repo secrets WWISE_EMAIL / WWISE_PASSWORD are not set. See docs/mod-ci.md."
+          }
           # wwise-cli (mircearoata/wwise-cli, same tool SML CI uses) downloads
           # the Wwise SDK once into the cache dir and integrates it into the
           # project's Plugins folder on every run.
@@ -104,8 +137,6 @@ jobs:
             --filter DirectXPlugin --cache-dir "${{ env.WWISE_CACHE }}"
           C:\CI\wwise-cli.exe integrate-project "SatisfactoryModLoader\FactoryGame.uproject" `
             --integration-version "2023.1.14.3247" --cache-dir "${{ env.WWISE_CACHE }}"
-        # gh needs a token even for public repos in some setups:
-        # GH_TOKEN is fine to reuse here.
 
       - name: Generate project files
         shell: pwsh

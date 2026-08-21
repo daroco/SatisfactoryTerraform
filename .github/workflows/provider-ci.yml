@@ -46,9 +46,15 @@ jobs:
       - name: Example applies against mockserver
         run: |
           go build -o /tmp/terraform-provider-satisfactory .
-          go run ./cmd/mockserver -addr :8090 &
+          go build -o /tmp/mockserver ./cmd/mockserver
+          /tmp/mockserver -addr :8090 &
           MOCK_PID=$!
           trap "kill $MOCK_PID" EXIT
+          for i in $(seq 1 30); do
+            curl -fsS http://localhost:8090/api/v1/health && break
+            [ "$i" = 30 ] && { echo "mockserver never became healthy"; exit 1; }
+            sleep 1
+          done
           cat > /tmp/dev.tfrc <<EOF
           provider_installation {
             dev_overrides {
