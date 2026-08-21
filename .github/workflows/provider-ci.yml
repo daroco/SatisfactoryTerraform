@@ -1,0 +1,64 @@
+name: provider-ci
+
+on:
+  push:
+    branches: ["**"]
+    paths-ignore:
+      - "mod/**"
+      - "**.md"
+  pull_request:
+    paths-ignore:
+      - "mod/**"
+      - "**.md"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+          terraform_wrapper: false
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Unit tests
+        run: go test ./internal/mockserver/ ./internal/client/...
+
+      - name: Acceptance tests (against mockserver)
+        run: go test ./internal/provider/ -v -timeout 10m
+        env:
+          TF_ACC: "1"
+
+      - name: Example applies against mockserver
+        run: |
+          go build -o /tmp/terraform-provider-satisfactory .
+          go run ./cmd/mockserver -addr :8090 &
+          MOCK_PID=$!
+          trap "kill $MOCK_PID" EXIT
+          cat > /tmp/dev.tfrc <<EOF
+          provider_installation {
+            dev_overrides {
+              "daroco/satisfactory" = "/tmp"
+            }
+            direct {}
+          }
+          EOF
+          export TF_CLI_CONFIG_FILE=/tmp/dev.tfrc
+          cd examples/iron-plate-line
+          terraform apply -auto-approve
+          terraform plan -detailed-exitcode   # must be an empty diff
+          terraform destroy -auto-approve

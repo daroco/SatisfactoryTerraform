@@ -1,0 +1,139 @@
+# Builds the SatisfactoTerraform UE mod on a self-hosted Windows runner.
+#
+# Modeled on the CI of SatisfactoryModLoader and FicsIt-Networks. Expect to
+# tweak paths/flags on the first run — UAT is picky and the engine release
+# layout changes occasionally.
+#
+# Runner prerequisites (one-time, see docs/mod-ci.md):
+#   - Self-hosted Windows runner registered on this repo, installed to a short
+#     path (e.g. C:\CI) to dodge Windows path-length limits.
+#   - Visual Studio 2022 with the SMR-documented workloads, Git, Git LFS, 7zip.
+#   - Repo secrets:
+#       ENGINE_GH_TOKEN  - PAT of a GitHub account that has been granted access
+#                          to satisfactorymodding/UnrealEngine (link your Epic
+#                          account per docs.ficsit.app to get it).
+#       WWISE_EMAIL / WWISE_PASSWORD - Audiokinetic credentials for wwise-cli.
+#
+# SECURITY: runs only on push to trusted branches + manual dispatch. Never add
+# pull_request here — fork PRs would execute arbitrary code on your PC.
+
+name: mod-build
+
+on:
+  push:
+    branches: [main, "claude/**"]
+    paths:
+      - "mod/**"
+      - ".github/workflows/mod-build.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+env:
+  # Everything heavyweight lives outside the workspace so it survives between
+  # runs on the self-hosted runner (the engine alone is tens of GB).
+  UE_ROOT: C:\CI\UE
+  WWISE_CACHE: C:\CI\Wwise
+  ENGINE_VERSION_TAG: ""   # empty = latest release of satisfactorymodding/UnrealEngine
+  SML_REF: master           # pin to a tag (e.g. v3.11.1) for reproducible builds
+  MOD_REFERENCE: SatisfactoTerraform
+
+jobs:
+  build:
+    runs-on: [self-hosted, Windows]
+    timeout-minutes: 240
+    steps:
+      # SML's repo IS the modding project: FactoryGame.uproject + Mods/ dir.
+      # Our mod is checked out inside its Mods folder.
+      - name: Checkout SatisfactoryModLoader (starter project)
+        uses: actions/checkout@v4
+        with:
+          repository: satisfactorymodding/SatisfactoryModLoader
+          ref: ${{ env.SML_REF }}
+          path: SatisfactoryModLoader
+
+      - name: Checkout this repo
+        uses: actions/checkout@v4
+        with:
+          path: satisfacto-form
+
+      - name: Place mod into project
+        shell: pwsh
+        run: |
+          $dest = "SatisfactoryModLoader\Mods\${{ env.MOD_REFERENCE }}"
+          if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
+          Copy-Item -Recurse satisfacto-form\mod $dest
+
+      - name: Install custom engine (cached on runner disk)
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.ENGINE_GH_TOKEN }}
+        run: |
+          if (Test-Path "${{ env.UE_ROOT }}\Engine\Build\BatchFiles\Build.bat") {
+            Write-Host "Engine already present at ${{ env.UE_ROOT }}, skipping download."
+            exit 0
+          }
+          New-Item -ItemType Directory -Force -Path "${{ env.UE_ROOT }}" | Out-Null
+          $tagArgs = @()
+          if ("${{ env.ENGINE_VERSION_TAG }}" -ne "") { $tagArgs = @("${{ env.ENGINE_VERSION_TAG }}") }
+          # The release ships as split 7z parts: UnrealEngine-CSS-Editor-Win64.7z.001 ...
+          gh release download @tagArgs --repo satisfactorymodding/UnrealEngine `
+            --pattern "UnrealEngine-CSS-Editor-Win64.7z*" --dir "${{ env.UE_ROOT }}\_dl"
+          7z x "${{ env.UE_ROOT }}\_dl\UnrealEngine-CSS-Editor-Win64.7z.001" -o"${{ env.UE_ROOT }}" -y
+          Remove-Item -Recurse -Force "${{ env.UE_ROOT }}\_dl"
+          # Register the engine build + install prerequisites (script name has
+          # moved between releases; run whichever exists).
+          $setup = Get-ChildItem "${{ env.UE_ROOT }}" -Filter "Setup*.bat" -Recurse -Depth 2 | Select-Object -First 1
+          if ($setup) { & $setup.FullName }
+
+      - name: Integrate Wwise (cached on runner disk)
+        shell: pwsh
+        env:
+          WWISE_EMAIL: ${{ secrets.WWISE_EMAIL }}
+          WWISE_PASSWORD: ${{ secrets.WWISE_PASSWORD }}
+        run: |
+          # wwise-cli (mircearoata/wwise-cli, same tool SML CI uses) downloads
+          # the Wwise SDK once into the cache dir and integrates it into the
+          # project's Plugins folder on every run.
+          if (-not (Test-Path "C:\CI\wwise-cli.exe")) {
+            gh release download --repo mircearoata/wwise-cli --pattern "wwise-cli-windows-amd64.exe" --dir C:\CI
+            Rename-Item C:\CI\wwise-cli-windows-amd64.exe wwise-cli.exe
+          }
+          C:\CI\wwise-cli.exe download --sdk-version "2023.1.14.8770" --filter Packages_Wwise_SDK `
+            --filter DirectXPlugin --cache-dir "${{ env.WWISE_CACHE }}"
+          C:\CI\wwise-cli.exe integrate-project "SatisfactoryModLoader\FactoryGame.uproject" `
+            --integration-version "2023.1.14.3247" --cache-dir "${{ env.WWISE_CACHE }}"
+        # gh needs a token even for public repos in some setups:
+        # GH_TOKEN is fine to reuse here.
+
+      - name: Generate project files
+        shell: pwsh
+        run: |
+          & "${{ env.UE_ROOT }}\Engine\Build\BatchFiles\GenerateProjectFiles.bat" `
+            -project="$PWD\SatisfactoryModLoader\FactoryGame.uproject" -game
+
+      - name: Build editor binaries
+        shell: pwsh
+        run: |
+          & "${{ env.UE_ROOT }}\Engine\Build\BatchFiles\Build.bat" `
+            FactoryGameEditor Win64 Development `
+            -project="$PWD\SatisfactoryModLoader\FactoryGame.uproject"
+
+      - name: Package mod (client Win64 + dedicated servers Win64/Linux)
+        shell: pwsh
+        run: |
+          & "${{ env.UE_ROOT }}\Engine\Build\BatchFiles\RunUAT.bat" `
+            -ScriptsForProject="$PWD\SatisfactoryModLoader\FactoryGame.uproject" `
+            PackagePlugin `
+            -project="$PWD\SatisfactoryModLoader\FactoryGame.uproject" `
+            -dlcname=${{ env.MOD_REFERENCE }} `
+            -merge -build -server
+
+      - name: Upload packaged mod
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.MOD_REFERENCE }}
+          path: |
+            SatisfactoryModLoader/Saved/ArchivedPlugins/${{ env.MOD_REFERENCE }}/*.zip
+          if-no-files-found: error

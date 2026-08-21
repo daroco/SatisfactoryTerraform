@@ -1,0 +1,23 @@
+# Go
+/bin/
+*.test
+*.out
+
+# Terraform (examples run locally against the mock)
+**/.terraform/
+**/.terraform.lock.hcl
+*.tfstate
+*.tfstate.backup
+crash.log
+
+# Unreal Engine (mod dir is source-only; build output stays local)
+mod/Binaries/
+mod/Intermediate/
+mod/Saved/
+mod/DerivedDataCache/
+*.pdb
+
+# Editor/OS noise
+.vscode/
+.idea/
+.DS_Store

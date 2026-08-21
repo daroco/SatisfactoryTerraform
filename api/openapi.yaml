@@ -1,0 +1,222 @@
+openapi: "3.0.3"
+info:
+  title: SatisfactoTerraform Mod API
+  description: >
+    REST API exposed by the SatisfactoTerraform SML mod from inside a running
+    Satisfactory session (host or dedicated server). The Terraform provider is
+    the only intended client. All write operations are queued to the game
+    thread and the response is returned once the change has been applied to
+    the world.
+  version: 0.1.0
+servers:
+  - url: http://localhost:8090/api/v1
+security:
+  - bearerAuth: []
+paths:
+  /health:
+    get:
+      summary: Liveness check
+      security: []
+      responses:
+        "200":
+          description: Mod is loaded and the HTTP listener is running.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [ok] }
+  /world:
+    get:
+      summary: Session metadata
+      responses:
+        "200":
+          description: Current session info.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  session_name: { type: string }
+                  game_version: { type: string }
+                  mod_version: { type: string }
+  /buildables:
+    get:
+      summary: List all Terraform-managed buildables
+      responses:
+        "200":
+          description: All buildables tagged with a tf_id.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Buildable" }
+    post:
+      summary: Spawn a buildable (machine or foundation)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Buildable" }
+      responses:
+        "201":
+          description: Spawned in the world.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Buildable" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/Invalid" }
+  /buildables/{tf_id}:
+    parameters:
+      - { name: tf_id, in: path, required: true, schema: { type: string } }
+    get:
+      summary: Read one buildable
+      responses:
+        "200":
+          description: Current state as read from the world.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Buildable" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      summary: Update recipe and/or clock speed in place
+      description: Only recipe and clock_speed are mutable; anything else requires replace.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                recipe: { type: string }
+                clock_speed: { type: number }
+      responses:
+        "200":
+          description: Updated buildable.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Buildable" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/Invalid" }
+    delete:
+      summary: Dismantle the buildable
+      responses:
+        "204": { description: Dismantled. }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /connections:
+    get:
+      summary: List all Terraform-managed connections (belts and power lines)
+      responses:
+        "200":
+          description: All connections tagged with a tf_id.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Connection" }
+    post:
+      summary: Create a belt or power line between two buildables
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Connection" }
+      responses:
+        "201":
+          description: Built in the world.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Connection" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/Invalid" }
+  /connections/{tf_id}:
+    parameters:
+      - { name: tf_id, in: path, required: true, schema: { type: string } }
+    get:
+      summary: Read one connection
+      responses:
+        "200":
+          description: Current state.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Connection" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      summary: Dismantle the connection
+      responses:
+        "204": { description: Dismantled. }
+        "404": { $ref: "#/components/responses/NotFound" }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  responses:
+    NotFound:
+      description: No object with that tf_id (demolished in-game or never created).
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Conflict:
+      description: An object with that tf_id already exists.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Invalid:
+      description: Unknown class/recipe, bad transform, or invalid connector reference.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+  schemas:
+    Error:
+      type: object
+      required: [message]
+      properties:
+        message: { type: string }
+    Transform:
+      type: object
+      required: [x, y, z]
+      description: World position in centimetres (Unreal units) and yaw in degrees.
+      properties:
+        x: { type: number }
+        y: { type: number }
+        z: { type: number }
+        yaw: { type: number, default: 0 }
+    Buildable:
+      type: object
+      required: [tf_id, class, transform]
+      properties:
+        tf_id:
+          type: string
+          description: Terraform-assigned stable ID; persisted in the save game.
+        class:
+          type: string
+          description: Game buildable class name, e.g. Build_ConstructorMk1_C or Build_Foundation_8x4_01_C.
+        transform: { $ref: "#/components/schemas/Transform" }
+        recipe:
+          type: string
+          description: Recipe class name for production machines, e.g. Recipe_IronPlate_C.
+        clock_speed:
+          type: number
+          default: 1.0
+          description: Clock speed as a fraction (1.0 = 100%).
+    ConnectionEndpoint:
+      type: object
+      required: [buildable_tf_id, connector]
+      properties:
+        buildable_tf_id:
+          type: string
+          description: tf_id of the buildable this end attaches to.
+        connector:
+          type: integer
+          description: Zero-based index into the buildable's connection components (factory connectors for belts, power connectors for wires).
+    Connection:
+      type: object
+      required: [tf_id, class, from, to]
+      properties:
+        tf_id: { type: string }
+        class:
+          type: string
+          description: Build_ConveyorBeltMk1_C .. Mk6, or Build_PowerLine_C.
+        from: { $ref: "#/components/schemas/ConnectionEndpoint" }
+        to: { $ref: "#/components/schemas/ConnectionEndpoint" }
