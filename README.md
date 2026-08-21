@@ -96,6 +96,23 @@ Tests: `go test ./...`; full acceptance run: `TF_ACC=1 go test ./internal/provid
   (`ENGINE_GH_TOKEN`, `WWISE_EMAIL`, `WWISE_PASSWORD`): see
   [docs/mod-ci.md](docs/mod-ci.md).
 
+## Where this can go: the GitOps factory
+
+Because state lives in Terraform and mutations go through a reviewable plan,
+some genuinely unhinged things fall out almost for free once M2/M3 land
+(design notes in [docs/gitops-factory.md](docs/gitops-factory.md)):
+
+- **The repo is the world** — a dedicated server runs the mod; CI applies
+  `main` on merge. The factory is the branch.
+- **PRs are governance** — `terraform plan` output posted as a PR comment is
+  the review artifact: "adds 4 smelters, rewires belt 12, dismantles nothing."
+  CODEOWNERS on `factories/nuclear/`.
+- **Twitch-plays mode is a merge policy** — chat votes, the winning PR merges,
+  viewers watch the buildings materialize. Griefing is drift; `terraform apply`
+  is disaster recovery.
+- **Rollbacks are `git revert`** — cursed spaghetti build merged? Revert the
+  commit and it un-exists.
+
 ## Status
 
 - ✅ M0 — provider + mock + tests + example + provider CI (this works today)
