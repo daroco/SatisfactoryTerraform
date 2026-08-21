@@ -130,8 +130,10 @@ jobs:
           # the Wwise SDK once into the cache dir and integrates it into the
           # project's Plugins folder on every run.
           if (-not (Test-Path "C:\CI\wwise-cli.exe")) {
-            gh release download --repo mircearoata/wwise-cli --pattern "wwise-cli-windows-amd64.exe" --dir C:\CI
-            Rename-Item C:\CI\wwise-cli-windows-amd64.exe wwise-cli.exe
+            # Release assets are named with underscores: wwise-cli_windows_amd64.exe
+            gh release download --repo mircearoata/wwise-cli --pattern "wwise-cli_windows_amd64.exe" --dir C:\CI
+            if ($LASTEXITCODE -ne 0) { Write-Error "wwise-cli download failed" }
+            Rename-Item C:\CI\wwise-cli_windows_amd64.exe wwise-cli.exe
           }
           C:\CI\wwise-cli.exe download --sdk-version "2023.1.14.8770" --filter Packages_Wwise_SDK `
             --filter DirectXPlugin --cache-dir "${{ env.WWISE_CACHE }}"
