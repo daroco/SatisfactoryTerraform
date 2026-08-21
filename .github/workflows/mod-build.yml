@@ -174,7 +174,11 @@ jobs:
             -project="$PWD\SatisfactoryModLoader\FactoryGame.uproject"
           if ($LASTEXITCODE -ne 0) { Write-Error "editor build failed" }
 
-      - name: Package mod (client Win64 + dedicated servers Win64/Linux)
+      # Linux dedicated server is intentionally out of scope for now: it needs
+      # a separate Linux cross-compile toolchain/sysroot installed on this
+      # runner ("Platform Linux is not a valid platform to build"). Add
+      # "-serverplatform=Win64+Linux" back once that's set up.
+      - name: Package mod (client Win64 + Windows dedicated server)
         shell: pwsh
         run: |
           & "${{ env.UE_ROOT }}\Engine\Build\BatchFiles\RunUAT.bat" `
@@ -184,7 +188,7 @@ jobs:
             -dlcname=${{ env.MOD_REFERENCE }} `
             -build -server `
             -clientconfig=Shipping -serverconfig=Shipping `
-            -platform=Win64 -serverplatform=Win64+Linux `
+            -platform=Win64 -serverplatform=Win64 `
             -nocompileeditor -installed -merge -utf8output
 
       - name: Upload packaged mod

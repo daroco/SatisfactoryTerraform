@@ -47,7 +47,9 @@ tool SML's own CI uses) to download and integrate the SDK, cached under
    project) and copies `mod/` into `Mods/SatisfactoTerraform/`.
 2. Downloads + extracts the engine to `C:\CI\UE` (first run only; ~1 h).
 3. Integrates Wwise, generates project files, builds editor binaries.
-4. Runs UAT `PackagePlugin` for Win64 client + Win64/Linux dedicated servers.
+4. Runs UAT `PackagePlugin` for Win64 client + Windows dedicated server.
+   (Linux dedicated server is a follow-up: it needs a separate Linux
+   cross-compile toolchain/sysroot on the runner, not installed by default.)
 5. Uploads the packaged mod zips as workflow artifacts — download from the
    run page and drop into your game/server's `Mods` folder (or install via
    Satisfactory Mod Manager pointing at the zip).
