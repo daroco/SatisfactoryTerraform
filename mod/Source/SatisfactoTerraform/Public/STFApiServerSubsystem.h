@@ -4,11 +4,11 @@
 #include "Subsystem/ModSubsystem.h"
 #include "HttpResultCallback.h"
 #include "HttpServerRequest.h"
+#include "HttpRouteHandle.h"
 #include "Containers/Queue.h"
 #include "STFApiServerSubsystem.generated.h"
 
 class IHttpRouter;
-struct FHttpRouteHandle;
 
 /**
  * Hosts the SatisfactoTerraform HTTP API (see api/openapi.yaml in the repo).
