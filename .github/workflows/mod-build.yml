@@ -47,14 +47,14 @@ jobs:
       # SML's repo IS the modding project: FactoryGame.uproject + Mods/ dir.
       # Our mod is checked out inside its Mods folder.
       - name: Checkout SatisfactoryModLoader (starter project)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: satisfactorymodding/SatisfactoryModLoader
           ref: ${{ env.SML_REF }}
           path: SatisfactoryModLoader
 
       - name: Checkout this repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: satisfacto-form
 
@@ -135,10 +135,23 @@ jobs:
             if ($LASTEXITCODE -ne 0) { Write-Error "wwise-cli download failed" }
             Rename-Item C:\CI\wwise-cli_windows_amd64.exe wwise-cli.exe
           }
-          C:\CI\wwise-cli.exe download --sdk-version "2023.1.14.8770" --filter Packages_Wwise_SDK `
-            --filter DirectXPlugin --cache-dir "${{ env.WWISE_CACHE }}"
-          C:\CI\wwise-cli.exe integrate-project "SatisfactoryModLoader\FactoryGame.uproject" `
-            --integration-version "2023.1.14.3247" --cache-dir "${{ env.WWISE_CACHE }}"
+          # Filters and versions mirror SML's own build.yml (sdk-version and
+          # integration-version are intentionally different). The empty
+          # DeploymentPlatforms filter includes the platform-agnostic files.
+          C:\CI\wwise-cli.exe download --sdk-version "2023.1.14.8770" `
+            --filter "Packages=SDK" `
+            --filter "DeploymentPlatforms=Windows_vc160" `
+            --filter "DeploymentPlatforms=Windows_vc170" `
+            --filter "DeploymentPlatforms=Linux" `
+            --filter "DeploymentPlatforms=" `
+            --email $env:WWISE_EMAIL --password $env:WWISE_PASSWORD `
+            --cache-dir "${{ env.WWISE_CACHE }}"
+          if ($LASTEXITCODE -ne 0) { Write-Error "wwise-cli download of the SDK failed" }
+          C:\CI\wwise-cli.exe integrate-ue --integration-version "2023.1.14.3555" `
+            --project "$PWD\SatisfactoryModLoader\FactoryGame.uproject" `
+            --email $env:WWISE_EMAIL --password $env:WWISE_PASSWORD `
+            --cache-dir "${{ env.WWISE_CACHE }}"
+          if ($LASTEXITCODE -ne 0) { Write-Error "wwise-cli integrate-ue failed" }
 
       - name: Generate project files
         shell: pwsh
@@ -164,7 +177,7 @@ jobs:
             -merge -build -server
 
       - name: Upload packaged mod
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ env.MOD_REFERENCE }}
           path: |
