@@ -182,7 +182,10 @@ jobs:
             PackagePlugin `
             -project="$PWD\SatisfactoryModLoader\FactoryGame.uproject" `
             -dlcname=${{ env.MOD_REFERENCE }} `
-            -merge -build -server
+            -build -server `
+            -clientconfig=Shipping -serverconfig=Shipping `
+            -platform=Win64 -serverplatform=Win64+Linux `
+            -nocompileeditor -installed -merge -utf8output
 
       - name: Upload packaged mod
         uses: actions/upload-artifact@v7
