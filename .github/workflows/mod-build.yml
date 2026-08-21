@@ -115,6 +115,19 @@ jobs:
           $setup = Get-ChildItem "${{ env.UE_ROOT }}" -Filter "Setup*.bat" -Recurse -Depth 2 | Select-Object -First 1
           if ($setup) { & $setup.FullName }
 
+      - name: Register engine build
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          # wwise-cli (and other UE tooling) resolves the engine through the
+          # registered-builds registry key, keyed by the uproject's
+          # EngineAssociation (e.g. 5.6.1-CSS). Registering is idempotent.
+          $assoc = (Get-Content "SatisfactoryModLoader\FactoryGame.uproject" -Raw | ConvertFrom-Json).EngineAssociation
+          if ([string]::IsNullOrEmpty($assoc)) { Write-Error "No EngineAssociation in FactoryGame.uproject" }
+          New-Item -Path "HKCU:\SOFTWARE\Epic Games\Unreal Engine\Builds" -Force | Out-Null
+          Set-ItemProperty -Path "HKCU:\SOFTWARE\Epic Games\Unreal Engine\Builds" -Name $assoc -Value "${{ env.UE_ROOT }}"
+          Write-Host "Registered engine build '$assoc' -> ${{ env.UE_ROOT }}"
+
       - name: Integrate Wwise (cached on runner disk)
         shell: pwsh
         env:
@@ -163,8 +176,9 @@ jobs:
         shell: pwsh
         run: |
           & "${{ env.UE_ROOT }}\Engine\Build\BatchFiles\Build.bat" `
-            FactoryGameEditor Win64 Development `
+            FactoryEditor Win64 Development `
             -project="$PWD\SatisfactoryModLoader\FactoryGame.uproject"
+          if ($LASTEXITCODE -ne 0) { Write-Error "editor build failed" }
 
       - name: Package mod (client Win64 + dedicated servers Win64/Linux)
         shell: pwsh
