@@ -66,7 +66,11 @@ jobs:
           export TF_CLI_CONFIG_FILE=/tmp/dev.tfrc
           for dir in examples/*/; do
             echo "--- $dir ---"
+            # init installs local `module` blocks (e.g. factory-floor's
+            # grid-2d); dev_overrides still means it skips fetching the
+            # provider itself.
             ( cd "$dir" \
+              && terraform init \
               && terraform apply -auto-approve \
               && terraform plan -detailed-exitcode \
               && terraform destroy -auto-approve )

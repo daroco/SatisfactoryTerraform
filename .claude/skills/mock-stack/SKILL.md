@@ -27,6 +27,9 @@ export TF_CLI_CONFIG_FILE=/tmp/satisfacto/dev.tfrc
 
 # 4. Apply / verify / destroy
 cd examples/iron-plate-line
+terraform init      # only needed for examples with local `module` blocks
+                     # (e.g. factory-floor) - installs them; dev_overrides
+                     # still means it skips fetching the provider itself
 terraform apply -auto-approve
 terraform plan -detailed-exitcode   # exit 0 = clean, 2 = drift, 1 = error
 terraform destroy -auto-approve
@@ -34,8 +37,9 @@ terraform destroy -auto-approve
 
 Notes:
 
-- With `dev_overrides` do NOT run `terraform init`; apply directly. Remove any
-  stale `.terraform.lock.hcl` if terraform complains.
+- With `dev_overrides`, `terraform init` still runs fine (it just skips
+  fetching the provider) and is required if the example has `module` blocks.
+  Remove any stale `.terraform.lock.hcl` if terraform complains.
 - If no `terraform` binary is on PATH, download one from
   releases.hashicorp.com (any 1.5+ works) and put it on PATH; acceptance tests
   accept `TF_ACC_TERRAFORM_PATH=<binary>` instead.
