@@ -5,6 +5,7 @@
 
 #include "Buildables/FGBuildable.h"
 #include "Buildables/FGBuildableFactory.h"
+#include "Buildables/FGBuildableManufacturer.h"
 #include "FGBuildableSubsystem.h"
 #include "FGRecipe.h"
 #include "FGDismantleInterface.h"
@@ -79,13 +80,17 @@ namespace
 
 		// Foundations/belts/etc. aren't production machines and have no
 		// recipe/clock_speed - the API contract makes both fields optional.
-		if (const AFGBuildableFactory* Factory = Cast<AFGBuildableFactory>(Buildable))
+		// GetCurrentRecipe/SetRecipe live on AFGBuildableManufacturer (which
+		// derives from AFGBuildableFactory, so GetPendingPotential is reached
+		// through the same cast) - confirmed against the real FactoryGame
+		// header, not AFGBuildableFactory itself.
+		if (const AFGBuildableManufacturer* Manufacturer = Cast<AFGBuildableManufacturer>(Buildable))
 		{
-			if (const TSubclassOf<UFGRecipe> Recipe = Factory->GetCurrentRecipe())
+			if (const TSubclassOf<UFGRecipe> Recipe = Manufacturer->GetCurrentRecipe())
 			{
 				Json->SetStringField(TEXT("recipe"), Recipe->GetName());
 			}
-			Json->SetNumberField(TEXT("clock_speed"), Factory->GetPendingPotential());
+			Json->SetNumberField(TEXT("clock_speed"), Manufacturer->GetPendingPotential());
 		}
 		return Json;
 	}
@@ -419,8 +424,8 @@ void ASTFApiServerSubsystem::DismantleBuildable(AFGBuildable* Buildable) const
 
 TSharedPtr<FJsonObject> ASTFApiServerSubsystem::PatchBuildable(AFGBuildable* Buildable, const TSharedPtr<FJsonObject>& Body, const FString& TFID, int32& OutStatus, FString& OutError)
 {
-	AFGBuildableFactory* Factory = Cast<AFGBuildableFactory>(Buildable);
-	if (!Factory)
+	AFGBuildableManufacturer* Manufacturer = Cast<AFGBuildableManufacturer>(Buildable);
+	if (!Manufacturer)
 	{
 		OutStatus = 422;
 		OutError = TEXT("this buildable has no recipe/clock_speed to patch");
@@ -436,7 +441,7 @@ TSharedPtr<FJsonObject> ASTFApiServerSubsystem::PatchBuildable(AFGBuildable* Bui
 			OutStatus = 422;
 			return nullptr;
 		}
-		Factory->SetRecipe(RecipeClass);
+		Manufacturer->SetRecipe(RecipeClass);
 	}
 
 	double ClockSpeed = 0;
@@ -448,7 +453,7 @@ TSharedPtr<FJsonObject> ASTFApiServerSubsystem::PatchBuildable(AFGBuildable* Bui
 			OutError = TEXT("clock_speed must be between 0.01 and 2.5");
 			return nullptr;
 		}
-		Factory->SetPendingPotential(ClockSpeed);
+		Manufacturer->SetPendingPotential(ClockSpeed);
 	}
 
 	return BuildableToJson(TFID, Buildable);
@@ -530,13 +535,13 @@ TSharedPtr<FJsonObject> ASTFApiServerSubsystem::SpawnBuildable(const TSharedPtr<
 		return nullptr;
 	}
 
-	if (AFGBuildableFactory* Factory = Cast<AFGBuildableFactory>(Buildable))
+	if (AFGBuildableManufacturer* Manufacturer = Cast<AFGBuildableManufacturer>(Buildable))
 	{
 		if (RecipeClass)
 		{
-			Factory->SetRecipe(RecipeClass);
+			Manufacturer->SetRecipe(RecipeClass);
 		}
-		Factory->SetPendingPotential(ClockSpeed);
+		Manufacturer->SetPendingPotential(ClockSpeed);
 	}
 
 	Buildable->FinishSpawning(Transform);
