@@ -150,6 +150,7 @@ some genuinely unhinged things fall out almost for free once M2/M3 land
 - ✅ M1 — mod skeleton (`mod/`) compiles and packages via `mod-build` CI:
   HTTP server, registry, machine spawn/delete; client + Windows dedicated
   server (Linux server descoped for now — needs a cross-compile toolchain)
-- 🚧 M2 — recipe/clock patch, robust class resolution, proper dismantle
-- ⏳ M3 — belts + power lines in the mod (provider side already done)
+- ✅ M2 — recipe/clock patch, robust class resolution, proper dismantle
+  (compiles and packages; not yet functionally verified in a live session)
+- 🚧 M3 — belts + power lines in the mod (provider side already done)
 - ⏳ M4+ — import/drift polish, dedicated-server docs, registry release

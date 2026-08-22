@@ -79,6 +79,8 @@ M0 (done): provider + mock + tests + example + provider-ci green.
 M1 (done): mod skeleton compiles and packages; mod-build workflow green
   (Windows client + Windows dedicated server; Linux server descoped for now,
   needs a cross-compile toolchain on the runner - see docs/mod-ci.md).
-M2 (in progress): PATCH recipe/clock in mod, asset-registry class resolution, proper dismantle.
-M3: belts + power lines in the mod (provider side already done).
+M2 (done): PATCH recipe/clock in mod, asset-registry class resolution, proper
+  dismantle - compiles and packages via mod-build; not yet functionally
+  verified in a live game session.
+M3 (in progress): belts + power lines in the mod (provider side already done).
 M4+: import/drift polish, dedicated-server docs, registry release, GitOps mode.
