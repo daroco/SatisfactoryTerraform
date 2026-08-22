@@ -4,19 +4,25 @@ The in-game half of the project: an SML mod that hosts the HTTP API described
 in [`../api/openapi.yaml`](../api/openapi.yaml). The Terraform provider is its
 only intended client.
 
-## Status (M1 skeleton)
+## Status (M2 in progress)
 
-Implemented in source, **not yet compiled against the game** — expect a first
-pass of compile fixes in the editor, this code was written off-line against the
-SML 3.x / UE 5.3 APIs:
+M1 compiles and packages via CI (client + Windows dedicated server). M2 items
+below are implemented in source but **their exact FactoryGame API calls are
+unverified against real headers** (this repo doesn't have them locally) — the
+mod-build CI run against the real engine is the actual compile check:
 
 - [x] Plugin/module scaffolding, SML root game-world module
 - [x] HTTP listener (UE `HTTPServer` module), bearer-token auth, JSON helpers
 - [x] Registry subsystem persisting `tf_id -> actor` in the save game
 - [x] `GET /health`, `GET /world`, buildable spawn/read/list/delete
-- [ ] `PATCH` recipe/clock (M2) — see TODO(M2) markers
+- [x] `PATCH` recipe/clock (M2) — `AFGBuildableFactory::SetRecipe` /
+      `SetPendingPotential`, applied at spawn too; read back on GET
+- [x] Robust class resolution via an asset-registry index (M2) —
+      `ResolveClassByName` in `STFApiServerSubsystem.cpp`, shared by
+      buildable and recipe lookups
+- [x] Proper dismantle (M2) — routes through `IFGDismantleInterface` when a
+      buildable implements it, falls back to `Destroy()` otherwise
 - [ ] Belts & power lines (M3) — see TODO(M3) in `SpawnConnection`
-- [ ] Robust class resolution via an asset-registry index (M2)
 
 Reference implementations to crib from while filling in the TODOs:
 [FactorySpawner](https://github.com/uniqueSimon/FactorySpawner) (spawning,

@@ -19,6 +19,7 @@ public class SatisfactoTerraform : ModuleRules
 			"HTTPServer",
 			"Json",
 			"JsonUtilities",
+			"AssetRegistry",
 		});
 	}
 }

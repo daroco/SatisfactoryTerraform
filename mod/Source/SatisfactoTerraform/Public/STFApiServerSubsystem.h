@@ -9,6 +9,7 @@
 #include "STFApiServerSubsystem.generated.h"
 
 class IHttpRouter;
+class AFGBuildable;
 
 /**
  * Hosts the SatisfactoTerraform HTTP API (see api/openapi.yaml in the repo).
@@ -56,8 +57,28 @@ private:
 
 	// World mutations (game thread only).
 	TSharedPtr<FJsonObject> SpawnBuildable(const TSharedPtr<FJsonObject>& Body, int32& OutStatus, FString& OutError);
+	TSharedPtr<FJsonObject> PatchBuildable(AFGBuildable* Buildable, const TSharedPtr<FJsonObject>& Body, const FString& TFID, int32& OutStatus, FString& OutError);
 	TSharedPtr<FJsonObject> SpawnConnection(const TSharedPtr<FJsonObject>& Body, int32& OutStatus, FString& OutError);
+
+	/** Dismantle via IFGDismantleInterface if implemented, else a plain Destroy(). */
+	void DismantleBuildable(AFGBuildable* Buildable) const;
 
 	/** Resolve a short class name like "Build_ConstructorMk1_C" to a UClass. */
 	UClass* ResolveBuildableClass(const FString& ClassName, FString& OutError) const;
+	/** Resolve a short class name like "Recipe_IronPlate_C" to a UClass. */
+	UClass* ResolveRecipeClass(const FString& ClassName, FString& OutError) const;
+
+	/**
+	 * Resolve any short class name to a UClass, requiring it derive from
+	 * ExpectedBase. Blueprint classes (everything Build_*_C / Recipe_*_C is)
+	 * aren't necessarily loaded yet, so this falls back to an asset-registry
+	 * name index (built lazily, once, on first miss) rather than only
+	 * checking already-loaded classes.
+	 */
+	UClass* ResolveClassByName(const FString& ClassName, UClass* ExpectedBase, FString& OutError) const;
+
+	/** name (without _C) -> the Blueprint asset's generated class path. Built lazily. */
+	mutable TMap<FString, FSoftObjectPath> ClassNameIndex;
+	mutable bool bClassNameIndexBuilt = false;
+	void BuildClassNameIndex() const;
 };

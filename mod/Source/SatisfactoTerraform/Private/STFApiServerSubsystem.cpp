@@ -4,7 +4,10 @@
 #include "STFRegistrySubsystem.h"
 
 #include "Buildables/FGBuildable.h"
+#include "Buildables/FGBuildableFactory.h"
 #include "FGBuildableSubsystem.h"
+#include "FGRecipe.h"
+#include "FGDismantleInterface.h"
 
 #include "HttpServerModule.h"
 #include "IHttpRouter.h"
@@ -14,6 +17,11 @@
 #include "Dom/JsonObject.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
+
+#include "AssetRegistry/AssetRegistryModule.h"
+#include "AssetRegistry/IAssetRegistry.h"
+#include "AssetRegistry/ARFilter.h"
+#include "Engine/Blueprint.h"
 
 namespace
 {
@@ -68,8 +76,17 @@ namespace
 		Transform->SetNumberField(TEXT("z"), Loc.Z);
 		Transform->SetNumberField(TEXT("yaw"), Buildable->GetActorRotation().Yaw);
 		Json->SetObjectField(TEXT("transform"), Transform);
-		// TODO(M2): include recipe + clock speed read back from the
-		// FGFactory/FGPowerInfo components for production machines.
+
+		// Foundations/belts/etc. aren't production machines and have no
+		// recipe/clock_speed - the API contract makes both fields optional.
+		if (const AFGBuildableFactory* Factory = Cast<AFGBuildableFactory>(Buildable))
+		{
+			if (const TSubclassOf<UFGRecipe> Recipe = Factory->GetCurrentRecipe())
+			{
+				Json->SetStringField(TEXT("recipe"), Recipe->GetName());
+			}
+			Json->SetNumberField(TEXT("clock_speed"), Factory->GetPendingPotential());
+		}
 		return Json;
 	}
 }
@@ -239,18 +256,29 @@ bool ASTFApiServerSubsystem::HandleBuildableByID(const FHttpServerRequest& Reque
 
 	if (Request.Verb == EHttpServerRequestVerbs::VERB_PATCH)
 	{
-		// TODO(M2): apply recipe / clock_speed to the FGFactory component
-		// (see AFGBuildableFactory::SetPendingPotential and recipe setters
-		// used by FactorySpawner).
-		OnComplete(ErrorResponse(422, TEXT("PATCH not implemented yet (M2)")));
+		const TSharedPtr<FJsonObject> Body = ParseBody(Request);
+		if (!Body.IsValid())
+		{
+			OnComplete(ErrorResponse(400, TEXT("invalid JSON")));
+			return true;
+		}
+		int32 Status = 200;
+		FString Error;
+		const TSharedPtr<FJsonObject> Result = PatchBuildable(Buildable, Body, TFID, Status, Error);
+		if (!Result.IsValid())
+		{
+			OnComplete(ErrorResponse(Status, Error));
+			return true;
+		}
+		OnComplete(JsonResponse(200, Result));
 		return true;
 	}
 
-	// DELETE — dismantle without refunds for now.
-	// TODO(M2): route through the proper dismantle flow (IFGDismantleInterface)
-	// so inventory refunds and belt/wire cleanup match vanilla behaviour.
+	// DELETE — dismantle through IFGDismantleInterface when the buildable
+	// implements it (refunds + connection cleanup match vanilla behaviour),
+	// falling back to a plain Destroy() otherwise.
 	Registry->Unregister(TFID);
-	Buildable->Destroy();
+	DismantleBuildable(Buildable);
 	auto Response = FHttpServerResponse::Create(TEXT(""), TEXT("application/json"));
 	Response->Code = EHttpServerResponseCodes::NoContent;
 	OnComplete(MoveTemp(Response));
@@ -300,6 +328,63 @@ bool ASTFApiServerSubsystem::HandleConnectionByID(const FHttpServerRequest& Requ
 	return true;
 }
 
+void ASTFApiServerSubsystem::BuildClassNameIndex() const
+{
+	bClassNameIndexBuilt = true;
+	const IAssetRegistry& AssetRegistry = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry")).Get();
+
+	TArray<FAssetData> Assets;
+	FARFilter Filter;
+	Filter.ClassPaths.Add(UBlueprint::StaticClass()->GetClassPathName());
+	Filter.bRecursiveClasses = true;
+	Filter.bRecursivePaths = true;
+	Filter.PackagePaths.Add(TEXT("/Game"));
+	AssetRegistry.GetAssets(Filter, Assets);
+
+	for (const FAssetData& Asset : Assets)
+	{
+		// A Blueprint asset named "Build_ConstructorMk1" generates the class
+		// "Build_ConstructorMk1_C" at "<package>.Build_ConstructorMk1_C" -
+		// index by that generated name so it matches the API's class
+		// strings (e.g. Build_ConstructorMk1_C, Recipe_IronPlate_C) exactly.
+		const FString GeneratedClassName = Asset.AssetName.ToString() + TEXT("_C");
+		const FString GeneratedClassPath = FString::Printf(TEXT("%s.%s"), *Asset.PackageName.ToString(), *GeneratedClassName);
+		ClassNameIndex.Add(GeneratedClassName, FSoftObjectPath(GeneratedClassPath));
+	}
+	UE_LOG(LogSatisfactoTerraform, Log, TEXT("Indexed %d Blueprint classes for name resolution"), ClassNameIndex.Num());
+}
+
+UClass* ASTFApiServerSubsystem::ResolveClassByName(const FString& ClassName, UClass* ExpectedBase, FString& OutError) const
+{
+	// Fast path: already loaded (common once the player has encountered it).
+	if (UClass* Loaded = FindFirstObject<UClass>(*ClassName, EFindFirstObjectOptions::None))
+	{
+		if (Loaded->IsChildOf(ExpectedBase))
+		{
+			return Loaded;
+		}
+	}
+
+	if (!bClassNameIndexBuilt)
+	{
+		BuildClassNameIndex();
+	}
+
+	if (const FSoftObjectPath* Path = ClassNameIndex.Find(ClassName))
+	{
+		if (UClass* Resolved = Cast<UClass>(Path->TryLoad()))
+		{
+			if (Resolved->IsChildOf(ExpectedBase))
+			{
+				return Resolved;
+			}
+		}
+	}
+
+	OutError = FString::Printf(TEXT("unknown class %s"), *ClassName);
+	return nullptr;
+}
+
 UClass* ASTFApiServerSubsystem::ResolveBuildableClass(const FString& ClassName, FString& OutError) const
 {
 	if (!ClassName.StartsWith(TEXT("Build_")) || !ClassName.EndsWith(TEXT("_C")))
@@ -307,17 +392,66 @@ UClass* ASTFApiServerSubsystem::ResolveBuildableClass(const FString& ClassName, 
 		OutError = TEXT("class must be a buildable class name like Build_ConstructorMk1_C");
 		return nullptr;
 	}
-	// Buildable blueprint classes are loaded once the player has scanned the
-	// game content; find by short name first, fall back to a soft path scan.
-	// TODO(M2): build a name -> soft path index from the asset registry at
-	// startup so unloaded classes resolve too (FactorySpawner has a table).
-	UClass* Class = FindFirstObject<UClass>(*ClassName, EFindFirstObjectOptions::None);
-	if (!Class || !Class->IsChildOf(AFGBuildable::StaticClass()))
+	return ResolveClassByName(ClassName, AFGBuildable::StaticClass(), OutError);
+}
+
+UClass* ASTFApiServerSubsystem::ResolveRecipeClass(const FString& ClassName, FString& OutError) const
+{
+	if (!ClassName.StartsWith(TEXT("Recipe_")) || !ClassName.EndsWith(TEXT("_C")))
 	{
-		OutError = FString::Printf(TEXT("unknown buildable class %s"), *ClassName);
+		OutError = TEXT("recipe must be a recipe class name like Recipe_IronPlate_C");
 		return nullptr;
 	}
-	return Class;
+	return ResolveClassByName(ClassName, UFGRecipe::StaticClass(), OutError);
+}
+
+void ASTFApiServerSubsystem::DismantleBuildable(AFGBuildable* Buildable) const
+{
+	if (Buildable->GetClass()->ImplementsInterface(UFGDismantleInterface::StaticClass()))
+	{
+		IFGDismantleInterface::Execute_Dismantle(Buildable);
+	}
+	else
+	{
+		Buildable->Destroy();
+	}
+}
+
+TSharedPtr<FJsonObject> ASTFApiServerSubsystem::PatchBuildable(AFGBuildable* Buildable, const TSharedPtr<FJsonObject>& Body, const FString& TFID, int32& OutStatus, FString& OutError)
+{
+	AFGBuildableFactory* Factory = Cast<AFGBuildableFactory>(Buildable);
+	if (!Factory)
+	{
+		OutStatus = 422;
+		OutError = TEXT("this buildable has no recipe/clock_speed to patch");
+		return nullptr;
+	}
+
+	FString RecipeClassName;
+	if (Body->TryGetStringField(TEXT("recipe"), RecipeClassName) && !RecipeClassName.IsEmpty())
+	{
+		UClass* RecipeClass = ResolveRecipeClass(RecipeClassName, OutError);
+		if (!RecipeClass)
+		{
+			OutStatus = 422;
+			return nullptr;
+		}
+		Factory->SetRecipe(RecipeClass);
+	}
+
+	double ClockSpeed = 0;
+	if (Body->TryGetNumberField(TEXT("clock_speed"), ClockSpeed))
+	{
+		if (ClockSpeed < 0.01 || ClockSpeed > 2.5)
+		{
+			OutStatus = 422;
+			OutError = TEXT("clock_speed must be between 0.01 and 2.5");
+			return nullptr;
+		}
+		Factory->SetPendingPotential(ClockSpeed);
+	}
+
+	return BuildableToJson(TFID, Buildable);
 }
 
 TSharedPtr<FJsonObject> ASTFApiServerSubsystem::SpawnBuildable(const TSharedPtr<FJsonObject>& Body, int32& OutStatus, FString& OutError)
@@ -344,6 +478,29 @@ TSharedPtr<FJsonObject> ASTFApiServerSubsystem::SpawnBuildable(const TSharedPtr<
 		return nullptr;
 	}
 
+	// Resolve the recipe (if any) and validate clock_speed up front too, so a
+	// bad value fails before anything is spawned rather than leaving a
+	// half-constructed actor behind.
+	UClass* RecipeClass = nullptr;
+	FString RecipeClassName;
+	if (Body->TryGetStringField(TEXT("recipe"), RecipeClassName) && !RecipeClassName.IsEmpty())
+	{
+		RecipeClass = ResolveRecipeClass(RecipeClassName, OutError);
+		if (!RecipeClass)
+		{
+			OutStatus = 422;
+			return nullptr;
+		}
+	}
+	double ClockSpeed = 1.0;
+	Body->TryGetNumberField(TEXT("clock_speed"), ClockSpeed);
+	if (ClockSpeed < 0.01 || ClockSpeed > 2.5)
+	{
+		OutStatus = 422;
+		OutError = TEXT("clock_speed must be between 0.01 and 2.5");
+		return nullptr;
+	}
+
 	const TSharedPtr<FJsonObject>* TransformJson = nullptr;
 	if (!Body->TryGetObjectField(TEXT("transform"), TransformJson))
 	{
@@ -360,10 +517,10 @@ TSharedPtr<FJsonObject> ASTFApiServerSubsystem::SpawnBuildable(const TSharedPtr<
 	const FTransform Transform(FRotator(0, Yaw, 0), Location);
 
 	// Spawn through the buildable subsystem so the buildable ticks in the
-	// factory tick group like a hologram-built one would.
-	// TODO(M2): set the built-with recipe (needed for dismantle refunds) and
-	// apply recipe/clock_speed for production machines — mirror what
-	// FactorySpawner does after spawn.
+	// factory tick group like a hologram-built one would. Recipe/clock_speed
+	// are set between BeginSpawnBuildable and FinishSpawning - the standard
+	// UE deferred-construction pattern - so construction scripts/BeginPlay
+	// see the final state.
 	AFGBuildableSubsystem* BuildableSubsystem = AFGBuildableSubsystem::Get(GetWorld());
 	AFGBuildable* Buildable = BuildableSubsystem->BeginSpawnBuildable(Class, Transform);
 	if (!Buildable)
@@ -372,6 +529,16 @@ TSharedPtr<FJsonObject> ASTFApiServerSubsystem::SpawnBuildable(const TSharedPtr<
 		OutError = TEXT("game refused to spawn that buildable");
 		return nullptr;
 	}
+
+	if (AFGBuildableFactory* Factory = Cast<AFGBuildableFactory>(Buildable))
+	{
+		if (RecipeClass)
+		{
+			Factory->SetRecipe(RecipeClass);
+		}
+		Factory->SetPendingPotential(ClockSpeed);
+	}
+
 	Buildable->FinishSpawning(Transform);
 
 	Registry->Register(TFID, Buildable);
