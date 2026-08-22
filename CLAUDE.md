@@ -40,7 +40,11 @@ Full dev loop for applying the example against the mock: see the
   environment** — it builds on a self-hosted Windows runner (mod-build
   workflow) or locally in the modding starter project. Treat it as
   write-carefully code: no way to typecheck it here.
-- `examples/iron-plate-line` — canonical example; CI applies it against the mock
+- `examples/iron-plate-line` — canonical minimal example; CI applies it against the mock
+- `examples/factory-floor` — range/grid placement example (`modules/grid-2d`);
+  every `examples/*` directory is applied/planned/destroyed in CI
+- `modules/grid-2d` — reusable local module: bounding box + spacing → a
+  `for_each`-ready map of positions. Pure HCL, no provider/mod changes.
 - `docs/` — architecture, mod CI runner setup, GitOps-factory design notes
 
 ## Conventions

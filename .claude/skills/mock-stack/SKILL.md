@@ -48,3 +48,8 @@ Notes:
   (gitignored, but clean up anyway).
 - This mirrors the "Example applies against mockserver" step in
   `.github/workflows/provider-ci.yml`; keep the two in sync.
+- `iron-plate-line` is the simplest walkthrough; every directory under
+  `examples/` is applied/planned/destroyed the same way in CI (a bash loop
+  over `examples/*/`), so the same steps 1-4 work unchanged for any of them
+  — swap the `cd` target. See `examples/factory-floor` for the grid/range
+  placement pattern (`modules/grid-2d`).

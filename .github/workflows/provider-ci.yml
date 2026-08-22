@@ -64,7 +64,10 @@ jobs:
           }
           EOF
           export TF_CLI_CONFIG_FILE=/tmp/dev.tfrc
-          cd examples/iron-plate-line
-          terraform apply -auto-approve
-          terraform plan -detailed-exitcode   # must be an empty diff
-          terraform destroy -auto-approve
+          for dir in examples/*/; do
+            echo "--- $dir ---"
+            ( cd "$dir" \
+              && terraform apply -auto-approve \
+              && terraform plan -detailed-exitcode \
+              && terraform destroy -auto-approve )
+          done

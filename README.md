@@ -52,7 +52,8 @@ save game (tf_id registry persists across save/load)
 | `internal/client`, `internal/api` | API client + shared wire types |
 | `internal/mockserver`, `cmd/mockserver` | In-memory mock of the mod API |
 | `mod/` | UE plugin source (SML mod) — compiled by CI/locally, not here |
-| `examples/iron-plate-line` | Working example config |
+| `examples/iron-plate-line` | Minimal working example config |
+| `examples/factory-floor` | Range/grid placement example (`modules/grid-2d`) |
 | `docs/mod-ci.md` | Self-hosted runner setup for the mod build |
 
 ## Resources
@@ -67,6 +68,40 @@ save game (tf_id registry persists across save/load)
 the live game at apply time, not baked into the provider — new game content
 works without a provider release. Class names are enumerated in the game's own
 `CommunityResources/Docs/` JSON and on the wikis.
+
+## Placing a range of buildings
+
+Instead of hand-placing every coordinate, use the `grid-2d` module to tile a
+bounding box:
+
+```hcl
+module "floor" {
+  source  = "./modules/grid-2d"
+  from    = { x = 0, y = 0 }
+  to      = { x = 3200, y = 1600 }
+  spacing = 800 # one Build_Foundation_8x4_01_C tile
+}
+
+resource "satisfactory_foundation" "floor" {
+  for_each = module.floor.positions
+  class    = "Build_Foundation_8x4_01_C"
+  x        = each.value.x
+  y        = each.value.y
+  z        = local.base_z
+}
+```
+
+The same module spaces out repeated buildings too — pass a wider `spacing`
+and feed the output into `satisfactory_building` instead. It's pure HCL (no
+provider changes): `for`/`range()` compute the grid, `for_each` with stable
+`"ix_iy"` keys keeps unrelated cells from being replaced when the bounding
+box changes later. See `modules/grid-2d/README.md` and
+`examples/factory-floor` for the full pattern, including why it's
+`for_each`-shaped rather than `count`-shaped.
+
+Spacing is always something you choose — the module has no notion of a
+building's actual in-game footprint (that would need the mod to expose a
+class's real collision/clearance size over the API, which isn't built yet).
 
 ## Developing without the game
 
