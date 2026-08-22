@@ -9,9 +9,13 @@ auth enforced.
 A Satisfactory dedicated server whose world is governed by a Git repo.
 Nobody builds by hand; the factory is whatever `main` says it is.
 
-```
-contributor ──PR──▶ GitHub ──plan comment──▶ review/vote ──merge──▶
-  apply workflow ──mod API──▶ dedicated server ──▶ everyone sees the change
+```mermaid
+flowchart LR
+    Contributor -->|PR| GitHub
+    GitHub -->|plan comment| Review["review/vote"]
+    Review -->|merge| Apply["apply workflow"]
+    Apply -->|mod API| Server["dedicated server"]
+    Server --> Everyone["everyone sees the change"]
 ```
 
 ## Mechanics that already exist

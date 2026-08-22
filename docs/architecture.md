@@ -1,18 +1,16 @@
 # Architecture
 
-```
-┌─────────────┐   HCL    ┌──────────────────────┐  HTTP/JSON   ┌─────────────────────────┐
-│ terraform   │ ───────▶ │ terraform-provider-  │ ───────────▶ │ SatisfactoTerraform mod │
-│ (state)     │          │ satisfactory (Go)    │  :8090       │ (UE C++/SML, in-game)   │
-└─────────────┘          └──────────────────────┘              │  ┌───────────────────┐  │
-                                    │                          │  │ API subsystem     │  │
-                                    │ dev/CI                   │  │ (HTTP listener)   │  │
-                                    ▼                          │  ├───────────────────┤  │
-                         ┌──────────────────────┐              │  │ Registry subsystem│  │
-                         │ mockserver (Go,      │              │  │ tf_id → actor,    │  │
-                         │ same API contract)   │              │  │ SaveGame-persisted│  │
-                         └──────────────────────┘              │  └───────────────────┘  │
-                                                               └─────────────────────────┘
+```mermaid
+flowchart LR
+    TF["terraform<br/>(state)"] -->|HCL| Provider["terraform-provider-satisfactory (Go)"]
+    Provider -->|"HTTP/JSON :8090"| API
+    Provider -.->|dev/CI| Mock["mockserver (Go)<br/>same API contract"]
+
+    subgraph Mod["SatisfactoTerraform mod (UE C++/SML, in-game)"]
+        API["API subsystem<br/>(HTTP listener)"]
+        Registry["Registry subsystem<br/>tf_id → actor,<br/>SaveGame-persisted"]
+        API --> Registry
+    end
 ```
 
 ## The contract
