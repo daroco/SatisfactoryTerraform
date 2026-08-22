@@ -25,14 +25,10 @@ resource "satisfactory_belt" "ingots" {
 
 ## How it works
 
-```
-terraform apply
-      │  (HTTPS-less localhost REST, api/openapi.yaml)
-      ▼
-SatisfactoTerraform mod (UE C++/SML) ── spawns/dismantles buildables,
-      │                                  tags each with its tf_id
-      ▼
-save game (tf_id registry persists across save/load)
+```mermaid
+flowchart TD
+    A["terraform apply"] -->|"localhost REST, api/openapi.yaml"| B["SatisfactoTerraform mod (UE C++/SML)<br/>spawns/dismantles buildables, tags each with its tf_id"]
+    B --> C["save game<br/>(tf_id registry persists across save/load)"]
 ```
 
 - The provider (`internal/provider`, terraform-plugin-framework) assigns each
