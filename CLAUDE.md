@@ -76,7 +76,9 @@ Full dev loop for applying the example against the mock: see the
 ## Current milestones
 
 M0 (done): provider + mock + tests + example + provider-ci green.
-M1 (in progress): mod skeleton first compile; mod-build workflow green.
-M2: PATCH recipe/clock in mod, asset-registry class resolution, proper dismantle.
+M1 (done): mod skeleton compiles and packages; mod-build workflow green
+  (Windows client + Windows dedicated server; Linux server descoped for now,
+  needs a cross-compile toolchain on the runner - see docs/mod-ci.md).
+M2 (in progress): PATCH recipe/clock in mod, asset-registry class resolution, proper dismantle.
 M3: belts + power lines in the mod (provider side already done).
 M4+: import/drift polish, dedicated-server docs, registry release, GitOps mode.

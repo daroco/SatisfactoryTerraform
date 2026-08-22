@@ -151,8 +151,9 @@ some genuinely unhinged things fall out almost for free once M2/M3 land
 ## Status
 
 - ✅ M0 — provider + mock + tests + example + provider CI (this works today)
-- 🚧 M1 — mod skeleton (`mod/`): HTTP server, registry, machine spawn/delete;
-  needs its first compile pass against the engine
-- ⏳ M2 — recipe/clock patch, robust class resolution, proper dismantle
+- ✅ M1 — mod skeleton (`mod/`) compiles and packages via `mod-build` CI:
+  HTTP server, registry, machine spawn/delete; client + Windows dedicated
+  server (Linux server descoped for now — needs a cross-compile toolchain)
+- 🚧 M2 — recipe/clock patch, robust class resolution, proper dismantle
 - ⏳ M3 — belts + power lines in the mod (provider side already done)
 - ⏳ M4+ — import/drift polish, dedicated-server docs, registry release
