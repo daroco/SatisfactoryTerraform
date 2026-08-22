@@ -46,12 +46,16 @@ jobs:
     steps:
       # SML's repo IS the modding project: FactoryGame.uproject + Mods/ dir.
       # Our mod is checked out inside its Mods folder.
+      # Checked out as "SML" (not "SatisfactoryModLoader") to keep every path
+      # nested under it short - UnrealBuildTool has its own hardcoded 260-char
+      # path guard independent of the Windows "enable long paths" OS setting,
+      # and this project's own directory depth eats that budget fast.
       - name: Checkout SatisfactoryModLoader (starter project)
         uses: actions/checkout@v7
         with:
           repository: satisfactorymodding/SatisfactoryModLoader
           ref: ${{ env.SML_REF }}
-          path: SatisfactoryModLoader
+          path: SML
 
       - name: Checkout this repo
         uses: actions/checkout@v7
@@ -61,7 +65,7 @@ jobs:
       - name: Place mod into project
         shell: pwsh
         run: |
-          $dest = "SatisfactoryModLoader\Mods\${{ env.MOD_REFERENCE }}"
+          $dest = "SML\Mods\${{ env.MOD_REFERENCE }}"
           if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
           Copy-Item -Recurse satisfacto-form\mod $dest
 
@@ -122,7 +126,7 @@ jobs:
           # wwise-cli (and other UE tooling) resolves the engine through the
           # registered-builds registry key, keyed by the uproject's
           # EngineAssociation (e.g. 5.6.1-CSS). Registering is idempotent.
-          $assoc = (Get-Content "SatisfactoryModLoader\FactoryGame.uproject" -Raw | ConvertFrom-Json).EngineAssociation
+          $assoc = (Get-Content "SML\FactoryGame.uproject" -Raw | ConvertFrom-Json).EngineAssociation
           if ([string]::IsNullOrEmpty($assoc)) { Write-Error "No EngineAssociation in FactoryGame.uproject" }
           New-Item -Path "HKCU:\SOFTWARE\Epic Games\Unreal Engine\Builds" -Force | Out-Null
           Set-ItemProperty -Path "HKCU:\SOFTWARE\Epic Games\Unreal Engine\Builds" -Name $assoc -Value "${{ env.UE_ROOT }}"
@@ -161,7 +165,7 @@ jobs:
             --cache-dir "${{ env.WWISE_CACHE }}"
           if ($LASTEXITCODE -ne 0) { Write-Error "wwise-cli download of the SDK failed" }
           C:\CI\wwise-cli.exe integrate-ue --integration-version "2023.1.14.3555" `
-            --project "$PWD\SatisfactoryModLoader\FactoryGame.uproject" `
+            --project "$PWD\SML\FactoryGame.uproject" `
             --email $env:WWISE_EMAIL --password $env:WWISE_PASSWORD `
             --cache-dir "${{ env.WWISE_CACHE }}"
           if ($LASTEXITCODE -ne 0) { Write-Error "wwise-cli integrate-ue failed" }
@@ -171,7 +175,7 @@ jobs:
         run: |
           & "${{ env.UE_ROOT }}\Engine\Build\BatchFiles\Build.bat" `
             FactoryEditor Win64 Development `
-            -project="$PWD\SatisfactoryModLoader\FactoryGame.uproject"
+            -project="$PWD\SML\FactoryGame.uproject"
           if ($LASTEXITCODE -ne 0) { Write-Error "editor build failed" }
 
       # Linux dedicated server is intentionally out of scope for now: it needs
@@ -182,9 +186,9 @@ jobs:
         shell: pwsh
         run: |
           & "${{ env.UE_ROOT }}\Engine\Build\BatchFiles\RunUAT.bat" `
-            -ScriptsForProject="$PWD\SatisfactoryModLoader\FactoryGame.uproject" `
+            -ScriptsForProject="$PWD\SML\FactoryGame.uproject" `
             PackagePlugin `
-            -project="$PWD\SatisfactoryModLoader\FactoryGame.uproject" `
+            -project="$PWD\SML\FactoryGame.uproject" `
             -dlcname=${{ env.MOD_REFERENCE }} `
             -build -server `
             -clientconfig=Shipping -serverconfig=Shipping `
@@ -196,5 +200,5 @@ jobs:
         with:
           name: ${{ env.MOD_REFERENCE }}
           path: |
-            SatisfactoryModLoader/Saved/ArchivedPlugins/${{ env.MOD_REFERENCE }}/*.zip
+            SML/Saved/ArchivedPlugins/${{ env.MOD_REFERENCE }}/*.zip
           if-no-files-found: error
