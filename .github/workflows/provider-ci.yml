@@ -66,11 +66,13 @@ jobs:
           export TF_CLI_CONFIG_FILE=/tmp/dev.tfrc
           for dir in examples/*/; do
             echo "--- $dir ---"
-            # init installs local `module` blocks (e.g. factory-floor's
-            # grid-2d); dev_overrides still means it skips fetching the
-            # provider itself.
+            # `terraform get` installs local `module` blocks (e.g.
+            # factory-floor's grid-2d) without touching providers/backend -
+            # full `terraform init` actively breaks under dev_overrides (it
+            # queries the registry for daroco/satisfactory, which doesn't
+            # exist there, and errors).
             ( cd "$dir" \
-              && terraform init \
+              && terraform get \
               && terraform apply -auto-approve \
               && terraform plan -detailed-exitcode \
               && terraform destroy -auto-approve )
