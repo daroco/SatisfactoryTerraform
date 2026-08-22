@@ -53,16 +53,11 @@ namespace
 		return Json;
 	}
 
-	/** Last path segment, e.g. the tf_id in /api/v1/buildables/{tf_id}. */
+	/** The :tf_id path parameter, parsed by IHttpRouter from a route
+	  * registered like "/api/v1/buildables/:tf_id" (see BindRoutes). */
 	FString PathID(const FHttpServerRequest& Request)
 	{
-		FString Path = Request.RelativePath.GetPath();
-		FString Left, ID;
-		if (Path.Split(TEXT("/"), &Left, &ID, ESearchCase::CaseSensitive, ESearchDir::FromEnd))
-		{
-			return ID;
-		}
-		return Path;
+		return Request.PathParams.FindRef(TEXT("tf_id"));
 	}
 
 	TSharedPtr<FJsonObject> BuildableToJson(const FString& TFID, const AFGBuildable* Buildable)
@@ -146,14 +141,19 @@ void ASTFApiServerSubsystem::BindRoutes()
 	Bind(TEXT("/api/v1/buildables"),
 		EHttpServerRequestVerbs::VERB_GET | EHttpServerRequestVerbs::VERB_POST,
 		&ASTFApiServerSubsystem::HandleBuildables);
-	// FHttpRouter has no path parameters; the handler parses the tf_id suffix.
-	Bind(TEXT("/api/v1/buildables/"),
+	// A leading-":" token is IHttpRouter's actual path-parameter syntax
+	// (FHttpRequestHandlerRegistrar::MatchesPath/ParsePathParameters) - it
+	// lands in Request.PathParams["tf_id"]. A bare trailing-slash route does
+	// NOT prefix-match; that was wrong and left GET/PATCH/DELETE-by-id
+	// unreachable (confirmed against the real router source and a live
+	// mod session: GET fell through to the list handler, PATCH 404'd).
+	Bind(TEXT("/api/v1/buildables/:tf_id"),
 		EHttpServerRequestVerbs::VERB_GET | EHttpServerRequestVerbs::VERB_PATCH | EHttpServerRequestVerbs::VERB_DELETE,
 		&ASTFApiServerSubsystem::HandleBuildableByID);
 	Bind(TEXT("/api/v1/connections"),
 		EHttpServerRequestVerbs::VERB_GET | EHttpServerRequestVerbs::VERB_POST,
 		&ASTFApiServerSubsystem::HandleConnections);
-	Bind(TEXT("/api/v1/connections/"),
+	Bind(TEXT("/api/v1/connections/:tf_id"),
 		EHttpServerRequestVerbs::VERB_GET | EHttpServerRequestVerbs::VERB_DELETE,
 		&ASTFApiServerSubsystem::HandleConnectionByID);
 }
@@ -522,10 +522,7 @@ TSharedPtr<FJsonObject> ASTFApiServerSubsystem::SpawnBuildable(const TSharedPtr<
 	const FTransform Transform(FRotator(0, Yaw, 0), Location);
 
 	// Spawn through the buildable subsystem so the buildable ticks in the
-	// factory tick group like a hologram-built one would. Recipe/clock_speed
-	// are set between BeginSpawnBuildable and FinishSpawning - the standard
-	// UE deferred-construction pattern - so construction scripts/BeginPlay
-	// see the final state.
+	// factory tick group like a hologram-built one would.
 	AFGBuildableSubsystem* BuildableSubsystem = AFGBuildableSubsystem::Get(GetWorld());
 	AFGBuildable* Buildable = BuildableSubsystem->BeginSpawnBuildable(Class, Transform);
 	if (!Buildable)
@@ -534,7 +531,15 @@ TSharedPtr<FJsonObject> ASTFApiServerSubsystem::SpawnBuildable(const TSharedPtr<
 		OutError = TEXT("game refused to spawn that buildable");
 		return nullptr;
 	}
+	Buildable->FinishSpawning(Transform);
 
+	// Recipe/clock_speed applied AFTER FinishSpawning, not between
+	// BeginSpawnBuildable/FinishSpawning: mCurrentRecipe is a Replicated
+	// SaveGame property and SetRecipe's real setup (input/output access
+	// indices against the buildable's factory connectors) needs those
+	// connectors already initialized, which only happens once construction
+	// finishes - confirmed live: setting it pre-FinishSpawning silently
+	// didn't stick (GetCurrentRecipe read back empty right after).
 	if (AFGBuildableManufacturer* Manufacturer = Cast<AFGBuildableManufacturer>(Buildable))
 	{
 		if (RecipeClass)
@@ -543,8 +548,6 @@ TSharedPtr<FJsonObject> ASTFApiServerSubsystem::SpawnBuildable(const TSharedPtr<
 		}
 		Manufacturer->SetPendingPotential(ClockSpeed);
 	}
-
-	Buildable->FinishSpawning(Transform);
 
 	Registry->Register(TFID, Buildable);
 	UE_LOG(LogSatisfactoTerraform, Log, TEXT("Spawned %s as %s"), *Class->GetName(), *TFID);
