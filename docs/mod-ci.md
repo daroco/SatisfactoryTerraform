@@ -44,7 +44,7 @@ tool SML's own CI uses) to download and integrate the SDK, cached under
 ## What a run does
 
 1. Checks out `satisfactorymodding/SatisfactoryModLoader` (the modding starter
-   project) and copies `mod/` into `Mods/SatisfactoTerraform/`.
+   project) and copies `mod/` into `Mods/SatisfactoryTerraform/`.
 2. Downloads + extracts the engine to `C:\CI\UE` (first run only; ~1 h).
 3. Integrates Wwise, generates project files, builds editor binaries.
 4. Runs UAT `PackagePlugin` for Win64 client + Windows dedicated server.

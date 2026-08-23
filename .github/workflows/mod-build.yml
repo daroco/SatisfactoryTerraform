@@ -1,4 +1,4 @@
-# Builds the SatisfactoTerraform UE mod on a self-hosted Windows runner.
+# Builds the SatisfactoryTerraform UE mod on a self-hosted Windows runner.
 #
 # Modeled on the CI of SatisfactoryModLoader and FicsIt-Networks. Expect to
 # tweak paths/flags on the first run — UAT is picky and the engine release
@@ -23,8 +23,8 @@ on:
   push:
     branches: [main, "claude/**"]
     paths:
-      - "mod/**"
-      - "!mod/**.md"
+      - "Source/**"
+      - "*.uplugin"
       - ".github/workflows/mod-build.yml"
   workflow_dispatch: {}
 
@@ -38,7 +38,7 @@ env:
   WWISE_CACHE: C:\CI\Wwise
   ENGINE_VERSION_TAG: ""   # empty = latest release of satisfactorymodding/UnrealEngine
   SML_REF: master           # pin to a tag (e.g. v3.11.1) for reproducible builds
-  MOD_REFERENCE: SatisfactoTerraform
+  MOD_REFERENCE: SatisfactoryTerraform
 
 jobs:
   build:
@@ -58,17 +58,22 @@ jobs:
           ref: ${{ env.SML_REF }}
           path: SML
 
+      # Checked out as "m" to keep paths short (see the SML checkout note);
+      # the repo root IS the plugin (uplugin at top level).
       - name: Checkout this repo
         uses: actions/checkout@v7
         with:
-          path: satisfacto-form
+          path: m
 
       - name: Place mod into project
         shell: pwsh
         run: |
           $dest = "SML\Mods\${{ env.MOD_REFERENCE }}"
           if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
-          Copy-Item -Recurse satisfacto-form\mod $dest
+          Copy-Item -Recurse m $dest
+          # Don't ship repo metadata into the plugin dir UAT packages.
+          Remove-Item -Recurse -Force "$dest\.git" -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force "$dest\.github" -ErrorAction SilentlyContinue
 
       - name: Preflight (secrets + tools)
         shell: pwsh

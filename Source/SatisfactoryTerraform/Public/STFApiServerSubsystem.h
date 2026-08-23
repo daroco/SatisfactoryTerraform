@@ -12,7 +12,7 @@ class IHttpRouter;
 class AFGBuildable;
 
 /**
- * Hosts the SatisfactoTerraform HTTP API (see api/openapi.yaml in the repo).
+ * Hosts the SatisfactoryTerraform HTTP API (see api/openapi.yaml in the repo).
  *
  * Threading model: FHttpServerModule invokes route handlers on the game
  * thread during its tick, but every world mutation is still funneled through
@@ -22,7 +22,7 @@ class AFGBuildable;
  * Only runs where there is authority (host / dedicated server).
  */
 UCLASS()
-class SATISFACTOTERRAFORM_API ASTFApiServerSubsystem : public AModSubsystem
+class SATISFACTORYTERRAFORM_API ASTFApiServerSubsystem : public AModSubsystem
 {
 	GENERATED_BODY()
 
@@ -33,11 +33,11 @@ public:
 	virtual void EndPlay(const EEndPlayReason::Type Reason) override;
 
 	/** Listen port; SML mod config can override. */
-	UPROPERTY(EditDefaultsOnly, Category = "SatisfactoTerraform")
+	UPROPERTY(EditDefaultsOnly, Category = "SatisfactoryTerraform")
 	int32 Port = 8090;
 
 	/** Optional bearer token; empty disables auth (localhost use). */
-	UPROPERTY(EditDefaultsOnly, Category = "SatisfactoTerraform")
+	UPROPERTY(EditDefaultsOnly, Category = "SatisfactoryTerraform")
 	FString Token;
 
 private:

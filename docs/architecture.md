@@ -6,7 +6,7 @@ flowchart LR
     Provider -->|"HTTP/JSON :8090"| API
     Provider -.->|dev/CI| Mock["mockserver (Go)<br/>same API contract"]
 
-    subgraph Mod["SatisfactoTerraform mod (UE C++/SML, in-game)"]
+    subgraph Mod["SatisfactoryTerraform mod (UE C++/SML, in-game)"]
         API["API subsystem<br/>(HTTP listener)"]
         Registry["Registry subsystem<br/>tf_id → actor,<br/>SaveGame-persisted"]
         API --> Registry
@@ -15,13 +15,15 @@ flowchart LR
 
 ## The contract
 
-`api/openapi.yaml` is the single source of truth. Four implementations must
-stay in lockstep — change the spec first, then all of:
+`api/openapi.yaml` in the
+[provider repo](https://github.com/daroco/terraform-provider-satisfactory)
+is the single source of truth. Four implementations must stay in lockstep
+— change the spec first, then all of:
 
-1. `internal/api` (wire types)
-2. `internal/client` (provider's HTTP client)
-3. `internal/mockserver` (in-memory reference implementation + validation)
-4. `mod/Source/...` (the real implementation, C++)
+1. `internal/api` (wire types, provider repo)
+2. `internal/client` (provider's HTTP client, provider repo)
+3. `internal/mockserver` (in-memory reference implementation, provider repo)
+4. `Source/...` here (the real implementation, C++)
 
 Error semantics: `404` unknown `tf_id`, `409` duplicate `tf_id`, `422`
 validation failure (unknown class, bad connector, clock out of range).

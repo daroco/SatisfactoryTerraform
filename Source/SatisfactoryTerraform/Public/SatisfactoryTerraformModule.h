@@ -3,11 +3,11 @@
 #include "CoreMinimal.h"
 #include "Modules/ModuleManager.h"
 
-class FSatisfactoTerraformModule : public IModuleInterface
+class FSatisfactoryTerraformModule : public IModuleInterface
 {
 public:
 	virtual void StartupModule() override;
 	virtual void ShutdownModule() override;
 };
 
-DECLARE_LOG_CATEGORY_EXTERN(LogSatisfactoTerraform, Log, All);
+DECLARE_LOG_CATEGORY_EXTERN(LogSatisfactoryTerraform, Log, All);

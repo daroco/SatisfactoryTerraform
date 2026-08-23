@@ -1,6 +1,6 @@
 #include "STFApiServerSubsystem.h"
 
-#include "SatisfactoTerraformModule.h"
+#include "SatisfactoryTerraformModule.h"
 #include "STFRegistrySubsystem.h"
 
 #include "Buildables/FGBuildable.h"
@@ -177,13 +177,13 @@ void ASTFApiServerSubsystem::BeginPlay()
 	Router = Module.GetHttpRouter(Port, /*bFailOnBindFailure*/ false);
 	if (!Router.IsValid())
 	{
-		UE_LOG(LogSatisfactoTerraform, Error, TEXT("Could not bind HTTP router on port %d"), Port);
+		UE_LOG(LogSatisfactoryTerraform, Error, TEXT("Could not bind HTTP router on port %d"), Port);
 		return;
 	}
 	ActiveInstance = this;
 	BindRoutesOnce();
 	Module.StartAllListeners();
-	UE_LOG(LogSatisfactoTerraform, Log, TEXT("SatisfactoTerraform API listening on port %d"), Port);
+	UE_LOG(LogSatisfactoryTerraform, Log, TEXT("SatisfactoryTerraform API listening on port %d"), Port);
 }
 
 void ASTFApiServerSubsystem::EndPlay(const EEndPlayReason::Type Reason)
@@ -422,7 +422,7 @@ bool ASTFApiServerSubsystem::HandleBuildableByID(const FHttpServerRequest& Reque
 			// happened and re-registering under the same tf_id risks a
 			// worse state) - just make it loud so it's diagnosable instead
 			// of silently vanishing.
-			UE_LOG(LogSatisfactoTerraform, Warning,
+			UE_LOG(LogSatisfactoryTerraform, Warning,
 				TEXT("Lightweight buildable %s: registry entry removed but the underlying instance's own Remove() reported failure - it may still be visible in-game, untracked"),
 				*TFID);
 		}
@@ -546,7 +546,7 @@ void ASTFApiServerSubsystem::BuildClassNameIndex() const
 		const FString GeneratedClassPath = FString::Printf(TEXT("%s.%s"), *Asset.PackageName.ToString(), *GeneratedClassName);
 		ClassNameIndex.Add(GeneratedClassName, FSoftObjectPath(GeneratedClassPath));
 	}
-	UE_LOG(LogSatisfactoTerraform, Log, TEXT("Indexed %d Blueprint classes for name resolution"), ClassNameIndex.Num());
+	UE_LOG(LogSatisfactoryTerraform, Log, TEXT("Indexed %d Blueprint classes for name resolution"), ClassNameIndex.Num());
 }
 
 UClass* ASTFApiServerSubsystem::ResolveClassByName(const FString& ClassName, UClass* ExpectedBase, FString& OutError) const
@@ -798,7 +798,7 @@ TSharedPtr<FJsonObject> ASTFApiServerSubsystem::SpawnBuildable(const TSharedPtr<
 			Buildable->Destroy();
 
 			Registry->RegisterLightweight(TFID, Ref);
-			UE_LOG(LogSatisfactoTerraform, Log, TEXT("Spawned %s as %s (lightweight)"), *Class->GetName(), *TFID);
+			UE_LOG(LogSatisfactoryTerraform, Log, TEXT("Spawned %s as %s (lightweight)"), *Class->GetName(), *TFID);
 			OutStatus = 201;
 			return LightweightToJson(TFID, Ref);
 		}
@@ -807,7 +807,7 @@ TSharedPtr<FJsonObject> ASTFApiServerSubsystem::SpawnBuildable(const TSharedPtr<
 	}
 
 	Registry->Register(TFID, Buildable);
-	UE_LOG(LogSatisfactoTerraform, Log, TEXT("Spawned %s as %s"), *Class->GetName(), *TFID);
+	UE_LOG(LogSatisfactoryTerraform, Log, TEXT("Spawned %s as %s"), *Class->GetName(), *TFID);
 	OutStatus = 201;
 	return BuildableToJson(TFID, Buildable);
 }
@@ -959,7 +959,7 @@ TSharedPtr<FJsonObject> ASTFApiServerSubsystem::SpawnConnection(const TSharedPtr
 
 	Registry->Register(TFID, Connection);
 	Registry->RegisterConnectionEndpoints(TFID, Endpoints);
-	UE_LOG(LogSatisfactoTerraform, Log, TEXT("Connected %s as %s"), *Class->GetName(), *TFID);
+	UE_LOG(LogSatisfactoryTerraform, Log, TEXT("Connected %s as %s"), *Class->GetName(), *TFID);
 	OutStatus = 201;
 	return ConnectionToJson(TFID, Class->GetName(), Endpoints);
 }

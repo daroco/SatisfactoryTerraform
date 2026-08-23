@@ -9,10 +9,10 @@
  *
  * If native root-module discovery gives you trouble on first build, the
  * fallback is the standard editor route: create a Blueprint subclass of this
- * (or of UGameWorldModule) at /SatisfactoTerraform/RootGameWorld_SatisfactoTerraform.
+ * (or of UGameWorldModule) at /SatisfactoryTerraform/RootGameWorld_SatisfactoryTerraform.
  */
 UCLASS()
-class SATISFACTOTERRAFORM_API USTFGameWorldModule : public UGameWorldModule
+class SATISFACTORYTERRAFORM_API USTFGameWorldModule : public UGameWorldModule
 {
 	GENERATED_BODY()
 

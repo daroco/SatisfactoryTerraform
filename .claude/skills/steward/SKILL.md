@@ -1,21 +1,19 @@
 ---
 name: steward
-description: Repo-specific guidance for driving PRs and CI on satisfacto-form - which checks gate what, how to babysit the self-hosted mod build, and the hard rules that protect the owner's PC.
+description: Repo-specific guidance for driving PRs and CI on SatisfactoryTerraform - which checks gate what, how to babysit the self-hosted mod build, and the hard rules that protect the owner's PC.
 ---
 
-# Stewarding satisfacto-form CI and PRs
+# Stewarding SatisfactoryTerraform CI and PRs
 
 ## Which checks matter
 
-- **provider-ci** (hosted) is the merge gate. It must be green: build, vet,
-  unit tests, acceptance tests, and an apply/plan/destroy of
-  `examples/iron-plate-line` against the mock. A red provider-ci is always
-  this repo's problem — reproduce locally (`mock-stack` skill; acceptance
-  tests need a terraform binary, `TF_ACC_TERRAFORM_PATH` accepted), fix, push.
 - **mod-build** (self-hosted Windows runner on the owner's gaming PC) builds
-  the UE mod. It is allowed to be red without blocking provider work, but
-  never leave it red silently: diagnose from job logs and either fix the
+  and packages the UE mod - it is this repo's only CI and its merge gate.
+  Never leave it red silently: diagnose from job logs and either fix the
   workflow or report exactly what the owner must do (secrets, runner state).
+- The Terraform provider and its hosted `provider-ci` live in
+  [terraform-provider-satisfactory](https://github.com/daroco/terraform-provider-satisfactory);
+  contract changes land there first (spec/types/mock/client), then here.
 
 ## mod-build failure triage
 
@@ -32,7 +30,7 @@ Read the failing step first; the workflow fails fast with explicit messages.
   layout drift; canonical asset pattern lives in FIN/SML CI (see below).
 - **Wwise step** — missing WWISE_EMAIL/WWISE_PASSWORD secrets, or wwise-cli
   SDK-version drift. Version pins live in the workflow env.
-- **Build/UAT step** — real compile errors in `mod/Source` are ours: fix the
+- **Build/UAT step** — real compile errors in `Source` are ours: fix the
   C++ (remember it cannot be compiled in the cloud environment — reason
   carefully from the error text and SML/FactoryGame headers). UAT
   flag/target-name errors: compare against
@@ -54,9 +52,8 @@ Read the failing step first; the workflow fails fast with explicit messages.
 
 ## Conventions recap
 
-- Contract changes follow the `add-resource` skill ordering (spec → types →
-  mock → client → provider → tests → mod).
+- Contract changes follow the provider repo's `add-resource` skill ordering
+  (spec → types → mock → client → provider → tests → mod); this repo
+  implements the final step.
 - Commits: imperative summary, body explains why; never include model names
   in committed content.
-- provider-ci and the `mock-stack` skill must describe the same loop; if you
-  change one, change the other.

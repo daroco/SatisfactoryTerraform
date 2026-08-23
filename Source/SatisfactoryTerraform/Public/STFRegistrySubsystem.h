@@ -79,7 +79,7 @@ struct FSTFLightweightRecord
  * Terraform plans a recreate.
  */
 UCLASS()
-class SATISFACTOTERRAFORM_API ASTFRegistrySubsystem : public AModSubsystem, public IFGSaveInterface
+class SATISFACTORYTERRAFORM_API ASTFRegistrySubsystem : public AModSubsystem, public IFGSaveInterface
 {
 	GENERATED_BODY()
 

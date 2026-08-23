@@ -3,11 +3,11 @@
 	"Version": 1,
 	"VersionName": "0.1.0",
 	"SemVersion": "0.1.0",
-	"FriendlyName": "SatisfactoTerraform",
+	"FriendlyName": "SatisfactoryTerraform",
 	"Description": "Exposes a local HTTP API so Terraform can manage buildings, belts and power lines as code.",
 	"Category": "Modding",
 	"CreatedBy": "daroco",
-	"CreatedByURL": "https://github.com/daroco/satisfacto-form",
+	"CreatedByURL": "https://github.com/daroco/SatisfactoryTerraform",
 	"CanContainContent": true,
 	"IsExperimentalVersion": false,
 	"Installed": false,
@@ -16,7 +16,7 @@
 	"GameVersion": ">=365306",
 	"Modules": [
 		{
-			"Name": "SatisfactoTerraform",
+			"Name": "SatisfactoryTerraform",
 			"Type": "Runtime",
 			"LoadingPhase": "Default"
 		}

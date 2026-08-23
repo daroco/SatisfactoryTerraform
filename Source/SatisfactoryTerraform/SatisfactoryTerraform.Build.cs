@@ -1,8 +1,8 @@
 using UnrealBuildTool;
 
-public class SatisfactoTerraform : ModuleRules
+public class SatisfactoryTerraform : ModuleRules
 {
-	public SatisfactoTerraform(ReadOnlyTargetRules Target) : base(Target)
+	public SatisfactoryTerraform(ReadOnlyTargetRules Target) : base(Target)
 	{
 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 		CppStandard = CppStandardVersion.Cpp20;
