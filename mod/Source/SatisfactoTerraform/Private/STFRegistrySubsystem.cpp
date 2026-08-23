@@ -24,6 +24,7 @@ void ASTFRegistrySubsystem::Unregister(const FString& TFID)
 {
 	Buildables.Remove(TFID);
 	LightweightBuildables.Remove(TFID);
+	ConnectionEndpoints.Remove(TFID);
 }
 
 AFGBuildable* ASTFRegistrySubsystem::Find(const FString& TFID) const
@@ -70,4 +71,14 @@ TArray<ASTFRegistrySubsystem::FEntry> ASTFRegistrySubsystem::GetAll() const
 		}
 	}
 	return Out;
+}
+
+void ASTFRegistrySubsystem::RegisterConnectionEndpoints(const FString& TFID, const FSTFConnectionEndpoints& Endpoints)
+{
+	ConnectionEndpoints.Add(TFID, Endpoints);
+}
+
+const FSTFConnectionEndpoints* ASTFRegistrySubsystem::FindConnectionEndpoints(const FString& TFID) const
+{
+	return ConnectionEndpoints.Find(TFID);
 }

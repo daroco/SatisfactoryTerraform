@@ -24,6 +24,7 @@ on:
     branches: [main, "claude/**"]
     paths:
       - "mod/**"
+      - "!mod/**.md"
       - ".github/workflows/mod-build.yml"
   workflow_dispatch: {}
 

@@ -6,9 +6,14 @@
 #include "Buildables/FGBuildable.h"
 #include "Buildables/FGBuildableFactory.h"
 #include "Buildables/FGBuildableManufacturer.h"
+#include "Buildables/FGBuildableConveyorBelt.h"
+#include "Buildables/FGBuildableWire.h"
 #include "FGBuildableSubsystem.h"
 #include "FGRecipe.h"
 #include "FGDismantleInterface.h"
+#include "FGFactoryConnectionComponent.h"
+#include "FGPowerConnectionComponent.h"
+#include "Tests/FGBuildableSpawnStrategy_Spline.h"
 
 #include "HttpServerModule.h"
 #include "IHttpRouter.h"
@@ -110,6 +115,45 @@ namespace
 		Transform->SetNumberField(TEXT("z"), Loc.Z);
 		Transform->SetNumberField(TEXT("yaw"), T.Rotator().Yaw);
 		Json->SetObjectField(TEXT("transform"), Transform);
+		return Json;
+	}
+
+	/** The API's "connector" is a zero-based index into a buildable's factory
+	  * connection components, in the canonical order the game itself sorts
+	  * them (UFGFactoryConnectionComponent::SortComponentList - the same
+	  * ordering used by e.g. FOR_EACH_FACTORY_CONNECTION). Returns nullptr if
+	  * out of range. */
+	UFGFactoryConnectionComponent* GetFactoryConnector(AFGBuildable* Buildable, int32 Index)
+	{
+		TInlineComponentArray<UFGFactoryConnectionComponent*> Connectors;
+		Buildable->GetComponents(Connectors);
+		UFGFactoryConnectionComponent::SortComponentList(Connectors);
+		return Connectors.IsValidIndex(Index) ? Connectors[Index] : nullptr;
+	}
+
+	/** Same as GetFactoryConnector but for power connectors - no canonical
+	  * sort helper is exposed for these (most buildables have exactly one),
+	  * so this uses plain component-array order. */
+	UFGPowerConnectionComponent* GetPowerConnector(AFGBuildable* Buildable, int32 Index)
+	{
+		TInlineComponentArray<UFGPowerConnectionComponent*> Connectors;
+		Buildable->GetComponents(Connectors);
+		return Connectors.IsValidIndex(Index) ? Connectors[Index] : nullptr;
+	}
+
+	TSharedPtr<FJsonObject> ConnectionToJson(const FString& TFID, const FString& ClassName, const FSTFConnectionEndpoints& Endpoints)
+	{
+		const TSharedPtr<FJsonObject> Json = MakeShared<FJsonObject>();
+		Json->SetStringField(TEXT("tf_id"), TFID);
+		Json->SetStringField(TEXT("class"), ClassName);
+		const TSharedPtr<FJsonObject> From = MakeShared<FJsonObject>();
+		From->SetStringField(TEXT("buildable_tf_id"), Endpoints.FromTFID);
+		From->SetNumberField(TEXT("connector"), Endpoints.FromConnector);
+		Json->SetObjectField(TEXT("from"), From);
+		const TSharedPtr<FJsonObject> To = MakeShared<FJsonObject>();
+		To->SetStringField(TEXT("buildable_tf_id"), Endpoints.ToTFID);
+		To->SetNumberField(TEXT("connector"), Endpoints.ToConnector);
+		Json->SetObjectField(TEXT("to"), To);
 		return Json;
 	}
 }
@@ -350,10 +394,30 @@ bool ASTFApiServerSubsystem::HandleConnections(const FHttpServerRequest& Request
 	{
 		return true;
 	}
+	ASTFRegistrySubsystem* Registry = ASTFRegistrySubsystem::Get(GetWorld());
+
 	if (Request.Verb == EHttpServerRequestVerbs::VERB_GET)
 	{
-		// TODO(M3): track connections in the registry like buildables.
-		auto Response = FHttpServerResponse::Create(TEXT("[]"), TEXT("application/json"));
+		// Connections share the registry's tf_id namespace with buildables
+		// (see STFRegistrySubsystem.h); FindConnectionEndpoints is what
+		// distinguishes "this id is a connection" from "this id is a
+		// buildable" - only entries with endpoints belong in this list.
+		TArray<TSharedPtr<FJsonValue>> Items;
+		for (const auto& Entry : Registry->GetAll())
+		{
+			if (Entry.IsLightweight())
+			{
+				continue; // structural buildables are never connections
+			}
+			if (const FSTFConnectionEndpoints* Endpoints = Registry->FindConnectionEndpoints(Entry.TFID))
+			{
+				Items.Add(MakeShared<FJsonValueObject>(ConnectionToJson(Entry.TFID, Entry.Buildable->GetClass()->GetName(), *Endpoints)));
+			}
+		}
+		FString Out;
+		const auto Writer = TJsonWriterFactory<>::Create(&Out);
+		FJsonSerializer::Serialize(Items, Writer);
+		auto Response = FHttpServerResponse::Create(Out, TEXT("application/json"));
 		Response->Code = EHttpServerResponseCodes::Ok;
 		OnComplete(MoveTemp(Response));
 		return true;
@@ -382,8 +446,32 @@ bool ASTFApiServerSubsystem::HandleConnectionByID(const FHttpServerRequest& Requ
 	{
 		return true;
 	}
-	// TODO(M3): connection lookup/dismantle once connections are registered.
-	OnComplete(ErrorResponse(404, TEXT("no connection with that tf_id")));
+	const FString TFID = PathID(Request);
+	ASTFRegistrySubsystem* Registry = ASTFRegistrySubsystem::Get(GetWorld());
+
+	// A connection is always a full actor (belts/wires are never lightweight-
+	// tracked - see SpawnConnection) with endpoint metadata registered; both
+	// must be present, otherwise this id is either unknown or a buildable.
+	AFGBuildable* Buildable = Registry->Find(TFID);
+	const FSTFConnectionEndpoints* Endpoints = Buildable ? Registry->FindConnectionEndpoints(TFID) : nullptr;
+	if (!Buildable || !Endpoints)
+	{
+		OnComplete(ErrorResponse(404, TEXT("no connection with that tf_id")));
+		return true;
+	}
+
+	if (Request.Verb == EHttpServerRequestVerbs::VERB_GET)
+	{
+		OnComplete(JsonResponse(200, ConnectionToJson(TFID, Buildable->GetClass()->GetName(), *Endpoints)));
+		return true;
+	}
+
+	// DELETE
+	Registry->Unregister(TFID);
+	DismantleBuildable(Buildable);
+	auto Response = FHttpServerResponse::Create(TEXT(""), TEXT("application/json"));
+	Response->Code = EHttpServerResponseCodes::NoContent;
+	OnComplete(MoveTemp(Response));
 	return true;
 }
 
@@ -462,6 +550,26 @@ UClass* ASTFApiServerSubsystem::ResolveRecipeClass(const FString& ClassName, FSt
 		return nullptr;
 	}
 	return ResolveClassByName(ClassName, UFGRecipe::StaticClass(), OutError);
+}
+
+UClass* ASTFApiServerSubsystem::ResolveConnectionClass(const FString& ClassName, FString& OutError) const
+{
+	if (!ClassName.StartsWith(TEXT("Build_")) || !ClassName.EndsWith(TEXT("_C")))
+	{
+		OutError = TEXT("class must be a belt (Build_ConveyorBeltMkN_C) or Build_PowerLine_C");
+		return nullptr;
+	}
+	UClass* Class = ResolveClassByName(ClassName, AFGBuildable::StaticClass(), OutError);
+	if (!Class)
+	{
+		return nullptr;
+	}
+	if (!Class->IsChildOf(AFGBuildableConveyorBelt::StaticClass()) && !Class->IsChildOf(AFGBuildableWire::StaticClass()))
+	{
+		OutError = TEXT("class must be a belt (Build_ConveyorBeltMkN_C) or Build_PowerLine_C");
+		return nullptr;
+	}
+	return Class;
 }
 
 void ASTFApiServerSubsystem::DismantleBuildable(AFGBuildable* Buildable) const
@@ -644,14 +752,141 @@ TSharedPtr<FJsonObject> ASTFApiServerSubsystem::SpawnBuildable(const TSharedPtr<
 
 TSharedPtr<FJsonObject> ASTFApiServerSubsystem::SpawnConnection(const TSharedPtr<FJsonObject>& Body, int32& OutStatus, FString& OutError)
 {
-	// TODO(M3): belts and power lines.
-	//  - Resolve both endpoint buildables from the registry (422 if missing).
-	//  - Belts: spawn AFGBuildableConveyorBelt, set spline points between the
-	//    two UFGFactoryConnectionComponents, then connect both ends.
-	//  - Power: spawn AFGBuildableWire and Connect() the two
-	//    UFGPowerConnectionComponents.
-	//  - Register under tf_id so GET/DELETE work.
-	OutStatus = 422;
-	OutError = TEXT("connections not implemented yet (M3)");
-	return nullptr;
+	const FString TFID = Body->GetStringField(TEXT("tf_id"));
+	if (TFID.IsEmpty())
+	{
+		OutStatus = 422;
+		OutError = TEXT("tf_id is required");
+		return nullptr;
+	}
+	ASTFRegistrySubsystem* Registry = ASTFRegistrySubsystem::Get(GetWorld());
+	if (Registry->Contains(TFID))
+	{
+		OutStatus = 409;
+		OutError = FString::Printf(TEXT("connection with tf_id %s already exists"), *TFID);
+		return nullptr;
+	}
+
+	UClass* Class = ResolveConnectionClass(Body->GetStringField(TEXT("class")), OutError);
+	if (!Class)
+	{
+		OutStatus = 422;
+		return nullptr;
+	}
+	const bool bIsBelt = Class->IsChildOf(AFGBuildableConveyorBelt::StaticClass());
+
+	const TSharedPtr<FJsonObject>* FromJson = nullptr;
+	const TSharedPtr<FJsonObject>* ToJson = nullptr;
+	if (!Body->TryGetObjectField(TEXT("from"), FromJson) || !Body->TryGetObjectField(TEXT("to"), ToJson))
+	{
+		OutStatus = 422;
+		OutError = TEXT("from and to are required");
+		return nullptr;
+	}
+	FSTFConnectionEndpoints Endpoints;
+	Endpoints.FromTFID = (*FromJson)->GetStringField(TEXT("buildable_tf_id"));
+	Endpoints.FromConnector = (*FromJson)->GetIntegerField(TEXT("connector"));
+	Endpoints.ToTFID = (*ToJson)->GetStringField(TEXT("buildable_tf_id"));
+	Endpoints.ToConnector = (*ToJson)->GetIntegerField(TEXT("connector"));
+
+	// Endpoints must be full actors - foundations/walls/etc. (lightweight-
+	// tracked) have no factory/power connectors to attach to, and Find()
+	// correctly returns nullptr for those, same as a genuinely unknown id.
+	AFGBuildable* FromBuildable = Registry->Find(Endpoints.FromTFID);
+	AFGBuildable* ToBuildable = Registry->Find(Endpoints.ToTFID);
+	if (!FromBuildable || !ToBuildable)
+	{
+		OutStatus = 422;
+		OutError = TEXT("from/to buildable_tf_id must reference an existing, connectable buildable");
+		return nullptr;
+	}
+
+	AFGBuildableSubsystem* BuildableSubsystem = AFGBuildableSubsystem::Get(GetWorld());
+	AFGBuildable* Connection = nullptr;
+
+	if (bIsBelt)
+	{
+		UFGFactoryConnectionComponent* FromConn = GetFactoryConnector(FromBuildable, Endpoints.FromConnector);
+		UFGFactoryConnectionComponent* ToConn = GetFactoryConnector(ToBuildable, Endpoints.ToConnector);
+		if (!FromConn || !ToConn)
+		{
+			OutStatus = 422;
+			OutError = TEXT("from/to connector index out of range for that buildable");
+			return nullptr;
+		}
+
+		// Spawn the belt actor at the "from" connector's transform, then
+		// route a spline to the "to" connector via the same strategy object
+		// UE itself uses for programmatically-placed spline buildables
+		// (UFGBuildableSpawnStrategy_Spline - confirmed against the real
+		// FactoryGame source; not test-only despite living under a "Tests"
+		// header, it's the general-purpose spline placement helper).
+		const FTransform FromTransform(FromConn->GetComponentRotation(), FromConn->GetConnectorLocation());
+		AFGBuildable* Belt = BuildableSubsystem->BeginSpawnBuildable(Class, FromTransform);
+		if (!Belt)
+		{
+			OutStatus = 422;
+			OutError = TEXT("game refused to spawn that belt");
+			return nullptr;
+		}
+
+		UFGBuildableSpawnStrategy_Spline* Strategy = NewObject<UFGBuildableSpawnStrategy_Spline>(Belt);
+		Strategy->mSplineRouteStrategy = EFGSplineBuildableRouteStrategy::Auto;
+		Strategy->mSplineBendRadius = 50.0f;
+		Strategy->mLocalStartTransform = FTransform::Identity;
+		const FVector LocalEndLocation = FromTransform.InverseTransformPosition(ToConn->GetConnectorLocation());
+		const FRotator LocalEndRotation = (ToConn->GetComponentRotation() - FromTransform.Rotator());
+		Strategy->mLocalEndTransform = FTransform(LocalEndRotation, LocalEndLocation);
+
+		Strategy->PreSpawnBuildable(Belt);
+		Belt->FinishSpawning(FromTransform);
+		Strategy->PostSpawnBuildable(Belt);
+
+		// SetConnection's real (compiled-game) implementation isn't visible
+		// from this source-available stub; call from both ends so the
+		// connection is correct regardless of whether it's one- or
+		// two-sided internally.
+		FromConn->SetConnection(ToConn);
+		ToConn->SetConnection(FromConn);
+
+		Connection = Belt;
+	}
+	else
+	{
+		UFGPowerConnectionComponent* FromConn = GetPowerConnector(FromBuildable, Endpoints.FromConnector);
+		UFGPowerConnectionComponent* ToConn = GetPowerConnector(ToBuildable, Endpoints.ToConnector);
+		if (!FromConn || !ToConn)
+		{
+			OutStatus = 422;
+			OutError = TEXT("from/to connector index out of range for that buildable");
+			return nullptr;
+		}
+
+		const FTransform SpawnTransform(FromConn->GetComponentLocation());
+		AFGBuildable* WireActor = BuildableSubsystem->BeginSpawnBuildable(Class, SpawnTransform);
+		if (!WireActor)
+		{
+			OutStatus = 422;
+			OutError = TEXT("game refused to spawn that power line");
+			return nullptr;
+		}
+		WireActor->FinishSpawning(SpawnTransform);
+
+		AFGBuildableWire* Wire = CastChecked<AFGBuildableWire>(WireActor);
+		if (!Wire->Connect(FromConn, ToConn))
+		{
+			Wire->Destroy();
+			OutStatus = 422;
+			OutError = TEXT("game refused to connect those power connectors");
+			return nullptr;
+		}
+
+		Connection = WireActor;
+	}
+
+	Registry->Register(TFID, Connection);
+	Registry->RegisterConnectionEndpoints(TFID, Endpoints);
+	UE_LOG(LogSatisfactoTerraform, Log, TEXT("Connected %s as %s"), *Class->GetName(), *TFID);
+	OutStatus = 201;
+	return ConnectionToJson(TFID, Class->GetName(), Endpoints);
 }

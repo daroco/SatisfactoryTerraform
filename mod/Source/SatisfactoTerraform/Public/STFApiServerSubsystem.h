@@ -67,6 +67,8 @@ private:
 	UClass* ResolveBuildableClass(const FString& ClassName, FString& OutError) const;
 	/** Resolve a short class name like "Recipe_IronPlate_C" to a UClass. */
 	UClass* ResolveRecipeClass(const FString& ClassName, FString& OutError) const;
+	/** Resolve a short class name like "Build_ConveyorBeltMk1_C" or "Build_PowerLine_C" to a UClass. */
+	UClass* ResolveConnectionClass(const FString& ClassName, FString& OutError) const;
 
 	/**
 	 * Resolve any short class name to a UClass, requiring it derive from
