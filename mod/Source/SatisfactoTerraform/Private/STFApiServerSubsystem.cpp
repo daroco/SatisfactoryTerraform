@@ -7,6 +7,7 @@
 #include "Buildables/FGBuildableFactory.h"
 #include "Buildables/FGBuildableManufacturer.h"
 #include "Buildables/FGBuildableConveyorBelt.h"
+#include "Buildables/FGBuildableConveyorAttachment.h"
 #include "Buildables/FGBuildableWire.h"
 #include "FGBuildableSubsystem.h"
 #include "FGRecipe.h"
@@ -574,7 +575,21 @@ UClass* ASTFApiServerSubsystem::ResolveConnectionClass(const FString& ClassName,
 
 void ASTFApiServerSubsystem::DismantleBuildable(AFGBuildable* Buildable) const
 {
-	if (Buildable->GetClass()->ImplementsInterface(UFGDismantleInterface::StaticClass()))
+	// AFGBuildableConveyorAttachment (splitters/mergers/lifts)'s own
+	// Dismantle_Implementation crashes the game: it calls
+	// IFGDismantleInterface::Execute_CanDismantle() on something that's
+	// null in this context (confirmed live - "Assertion failed: O != 0",
+	// FGDismantleInterface.gen.cpp:48, called from
+	// FGBuildableConveyorAttachment.cpp:179). That's the real game's
+	// compiled logic, not ours, and not something we can fix - only avoid.
+	// Skip the interface entirely for this family and destroy directly;
+	// the cost is no build-cost refund on dismantle for these classes,
+	// which is cheap for a splitter/merger anyway.
+	if (Buildable->IsA(AFGBuildableConveyorAttachment::StaticClass()))
+	{
+		Buildable->Destroy();
+	}
+	else if (Buildable->GetClass()->ImplementsInterface(UFGDismantleInterface::StaticClass()))
 	{
 		IFGDismantleInterface::Execute_Dismantle(Buildable);
 	}

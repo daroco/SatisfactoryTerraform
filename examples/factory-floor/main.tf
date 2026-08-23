@@ -18,6 +18,8 @@ provider "satisfactory" {
 }
 
 locals {
+  # Buildings sit 200cm above the foundation's own z, not 100 - calibrated
+  # live (see mod/README.md's "Placement offset" note).
   base_z = 20000
 }
 
@@ -52,7 +54,7 @@ resource "satisfactory_building" "smelter_row" {
   recipe   = "Recipe_IngotIron_C"
   x        = each.value.x
   y        = each.value.y
-  z        = local.base_z + 100
+  z        = local.base_z + 200
 }
 
 output "foundation_count" {

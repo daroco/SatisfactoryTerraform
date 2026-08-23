@@ -46,7 +46,13 @@ locals {
   # example moves to a different save/session - the mod's tf_id registry
   # is persisted per save game, so it starts empty on a new one.
   base_z   = 5793.27
-  build_z  = local.base_z + 100
+  # +200, not +100 - calibrated live by placing a row of constructors at
+  # several heights on a foundation and eyeballing which one sat flush
+  # (see mod/README.md's "Placement offset" note). Machines appear to be
+  # pivoted 2m above their own base, so they need base_z + half the
+  # foundation's 4m thickness to land on the surface instead of embedded
+  # in it.
+  build_z  = local.base_z + 200
   center_x = -223975.55
   center_y = -31243.68
 }

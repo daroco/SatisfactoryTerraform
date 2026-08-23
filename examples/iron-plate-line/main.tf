@@ -22,6 +22,9 @@ provider "satisfactory" {
 
 locals {
   # Grid-ish layout in centimetres; one foundation is 800 x 800.
+  # Buildings sit 200cm above the foundation's own z, not 100 - calibrated
+  # live (see mod/README.md's "Placement offset" note); a machine placed at
+  # base_z + 100 lands partway embedded in the foundation.
   base_z = 20000
 }
 
@@ -37,7 +40,7 @@ resource "satisfactory_building" "smelter" {
   class  = "Build_SmelterMk1_C"
   x      = 200
   y      = 0
-  z      = local.base_z + 100
+  z      = local.base_z + 200
   recipe = "Recipe_IngotIron_C"
 }
 
@@ -45,7 +48,7 @@ resource "satisfactory_building" "constructor" {
   class       = "Build_ConstructorMk1_C"
   x           = 2200
   y           = 0
-  z           = local.base_z + 100
+  z           = local.base_z + 200
   recipe      = "Recipe_IronPlate_C"
   clock_speed = 1.0
 }

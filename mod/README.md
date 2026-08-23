@@ -105,6 +105,65 @@ belt/wire hookup) and
 [FicsitRemoteMonitoring](https://github.com/porisius/FicsitRemoteMonitoring)
 (in-game web server patterns).
 
+### Placement offset
+
+A `satisfactory_building`/`satisfactory_foundation`'s `z` is where its own
+actor origin lands, not a "sits on top of" height — there's no snapping to
+whatever's underneath, since the API places at an exact transform. Building
+a floor + machines with Terraform therefore means picking the right
+constant offset between a foundation's `z` and the `z` a machine on top of
+it needs. Calibrated live (spawn a row of constructors at several
+z-deltas on one foundation, eyeball which one sits flush - see
+`examples/factory-hub`'s "ruler" approach): **+200**, not the +100
+originally guessed in `examples/iron-plate-line`. All three `examples/*`
+foundations-and-machines layouts use `base_z + 200`. This is a fixed
+constant for these specific classes (`Build_Foundation_8x4_01_C` on top of
+`Build_SmelterMk1_C`/`Build_ConstructorMk1_C`/the conveyor attachments) -
+different foundation/machine classes would need their own calibration, and
+the API has no way to ask a class for its own footprint/pivot (see the
+`grid-2d` module's README for the same caveat on spacing).
+
+### Route rebinding across a save switch (open issue)
+
+`BindRoutes`/`EndPlay` (see `ASTFApiServerSubsystem.h`/`.cpp`) bind the six
+routes in `BeginPlay` and unbind them in `EndPlay`, which should make a
+clean level transition rebind fine. Observed live, though: the *first* save
+loaded after launching the game routes fine, but switching to a *second*
+save without fully quitting the process leaves the two `:tf_id` templated
+routes (`/api/v1/buildables/:tf_id`, `/api/v1/connections/:tf_id`)
+returning `route_handler_not_found` for every request, while the
+non-templated routes (`/health`, `/world`, the bare `/buildables` and
+`/connections` list/create routes) keep working fine on the new save.
+`EndPlay`'s `UnbindRoute` calls look correct, so this looks like an
+`IHttpRouter` quirk specific to re-registering a path *template* rather
+than a mod bug in the unbind logic - not root-caused yet. Breaks
+`GetBuildable`/`PatchBuildable`/`DeleteBuildable` (so `terraform plan`
+shows every resource as needing recreation) until the whole game process is
+restarted. Workaround: fully quit and relaunch Satisfactory (not just
+load a different save) after switching saves before running Terraform
+against it again.
+
+### Conveyor attachment dismantle crash (fixed)
+
+Deleting a `satisfactory_building` that's a splitter/merger/lift
+(`AFGBuildableConveyorAttachment` and subclasses) through
+`DELETE /api/v1/buildables/:tf_id` crashed the whole game - confirmed live,
+twice, both times mid-`terraform apply` while replacing a merger/splitter
+for the placement-offset fix above. The game's own crash report:
+`Assertion failed: O != 0` in `FGDismantleInterface.gen.cpp:48`, called
+from `AFGBuildableConveyorAttachment::Dismantle_Implementation()`
+(`FGBuildableConveyorAttachment.cpp:179` - real compiled game code, not
+ours; the local SML source for both files is stub-only, so the actual
+logic isn't inspectable). Something inside that function's own dismantle
+handling calls `IFGDismantleInterface::Execute_CanDismantle()` on a null
+object in this context - not something a mod can fix, only avoid.
+`DismantleBuildable` (`STFApiServerSubsystem.cpp`) now special-cases
+`AFGBuildableConveyorAttachment` to `Destroy()` directly instead of going
+through `IFGDismantleInterface::Execute_Dismantle`, same as the existing
+fallback for classes that don't implement the interface at all. Cost: no
+build-cost refund on dismantle for this class family specifically - cheap
+for a splitter/merger, and far better than a crash.
+
 ## Building locally
 
 1. Follow the [Satisfactory modding docs](https://docs.ficsit.app/) beginner
