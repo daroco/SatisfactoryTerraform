@@ -52,24 +52,26 @@ checks both. See `STFRegistrySubsystem.h` and the `SpawnBuildable` comments
 in `STFApiServerSubsystem.cpp` for the full reasoning — every API name here
 was confirmed against the real FactoryGame source, not guessed.
 
-**Session-boundary self-heal.** `FLightweightBuildableInstanceRef` caches a
-weak pointer (`OwnerSubsystem`) to the `AFGLightweightBuildableSubsystem`
-that existed when it was created, but that subsystem actor is recreated
-fresh every session — a ref deserialized from a save has a stale
-`OwnerSubsystem` even though the underlying lightweight data (which the game
-itself saves) is fine. Worse (confirmed live, issue #2): the ref's saved
-`LightweightBuildableID` is just an index into the subsystem's per-class
-instance array, which the game rebuilds on load — so after a relaunch the
-saved id can point at nothing, or at a *different* instance. An earlier
-version of this fix re-`Initialize()`d with the saved id (read via
-reflection) and failed exactly that way. `ASTFRegistrySubsystem::
-RevalidateLightweightRef` now recovers by the identity that actually
-survives the round trip — the ref's own saved class + location — scanning
-`GetAllLightweightBuildableInstances()` (a public, header-inline accessor,
-so no stub-source caveat) for the live instance within 1cm and
-re-`Initialize()`ing with its current index. `FindLightweight` and `GetAll`
-call this before trusting a stored ref; no match means genuinely dismantled
-and surfaces as 404.
+**Session-boundary self-heal.** The registry must not persist
+`FLightweightBuildableInstanceRef` itself: none of that struct's members
+(`BuildableClass`/`Transform`/`LightweightBuildableID`) carry the
+`SaveGame` flag, so a SaveGame-marked map of refs round-trips as *empty
+structs* — the root cause behind two prior failed versions of this fix
+(id-based recovery via reflection, then class+location recovery reading
+the ref's own fields: both were healing refs that had loaded back blank,
+confirmed live when 64 foundations vanished from the API after every
+relaunch while still standing in the world - issue #2). Two other real
+pitfalls discovered along the way, still relevant: the ref's
+`OwnerSubsystem` weak pointer dies every session (the subsystem actor is
+recreated), and `LightweightBuildableID` is just an index into a per-class
+array the game rebuilds on load, so a saved id can point at nothing — or
+at a *different* tile. The registry therefore stores its own
+`FSTFLightweightRecord`: SaveGame-flagged class + transform (the identity
+that actually survives), plus a Transient engine ref re-resolved on first
+use each session by scanning `GetAllLightweightBuildableInstances()` (a
+public, header-inline accessor, so no stub-source caveat) for the live
+instance of that class within 1cm of the saved location. No match means
+genuinely dismantled → 404 → Terraform plans a recreate.
 
 ### Connections (belts & power lines, M3)
 

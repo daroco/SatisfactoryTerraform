@@ -17,7 +17,11 @@ void ASTFRegistrySubsystem::Register(const FString& TFID, AFGBuildable* Buildabl
 
 void ASTFRegistrySubsystem::RegisterLightweight(const FString& TFID, const FLightweightBuildableInstanceRef& Ref)
 {
-	LightweightBuildables.Add(TFID, Ref);
+	FSTFLightweightRecord Record;
+	Record.BuildableClass = Ref.GetBuildableClass();
+	Record.Transform = Ref.GetBuildableTransform();
+	Record.RuntimeRef = Ref;
+	LightweightBuildables.Add(TFID, MoveTemp(Record));
 }
 
 void ASTFRegistrySubsystem::Unregister(const FString& TFID)
@@ -57,38 +61,35 @@ AFGBuildable* ASTFRegistrySubsystem::Find(const FString& TFID) const
 	return *Found;
 }
 
-bool ASTFRegistrySubsystem::RevalidateLightweightRef(FLightweightBuildableInstanceRef& Ref) const
+bool ASTFRegistrySubsystem::RevalidateLightweightRecord(FSTFLightweightRecord& Record) const
 {
-	if (Ref.IsValid())
+	// The cached ref is session-local (Transient - persisting the engine
+	// ref round-trips as an empty struct, see the header). Valid means it
+	// was resolved earlier this session and the instance still exists.
+	if (Record.RuntimeRef.IsValid())
 	{
 		return true;
 	}
 
-	// A ref deserialized from the save has a dead OwnerSubsystem weak
-	// pointer, and its saved LightweightBuildableID is NOT trustworthy
-	// either: that id is just an index into the subsystem's per-class
-	// instance array, which the game rebuilds on load, so indices can
-	// shift (confirmed live, issue #2: foundations vanished from the API
-	// after a relaunch while still standing in the world - and an
-	// id-based re-Initialize could silently bind a *different* tile).
-	// The identity that survives the round trip is what the ref itself
-	// saved: buildable class + transform. Re-find the instance by those.
+	// Re-find the instance by the identity we saved ourselves: class +
+	// location. The instance's index in the subsystem's per-class array is
+	// NOT part of that identity - the game rebuilds those arrays on load,
+	// so indices shift between sessions (issue #2).
 	// GetAllLightweightBuildableInstances is a header-inline accessor, so
 	// unlike most of this class it works without the stub-source caveat.
 	AFGLightweightBuildableSubsystem* LightweightSubsystem = AFGLightweightBuildableSubsystem::Get(GetWorld());
-	const TSubclassOf<AFGBuildable> BuildableClass = Ref.GetBuildableClass();
-	if (!LightweightSubsystem || !BuildableClass)
+	if (!LightweightSubsystem || !Record.BuildableClass)
 	{
 		return false;
 	}
 	const TArray<FRuntimeBuildableInstanceData>* Instances =
-		LightweightSubsystem->GetAllLightweightBuildableInstances().Find(BuildableClass);
+		LightweightSubsystem->GetAllLightweightBuildableInstances().Find(Record.BuildableClass);
 	if (!Instances)
 	{
 		return false;
 	}
 
-	const FVector SavedLocation = Ref.GetBuildableTransform().GetLocation();
+	const FVector SavedLocation = Record.Transform.GetLocation();
 	for (int32 Index = 0; Index < Instances->Num(); ++Index)
 	{
 		const FRuntimeBuildableInstanceData& Data = (*Instances)[Index];
@@ -99,8 +100,8 @@ bool ASTFRegistrySubsystem::RevalidateLightweightRef(FLightweightBuildableInstan
 		{
 			continue;
 		}
-		Ref.Initialize(LightweightSubsystem, BuildableClass, Index);
-		return Ref.IsValid();
+		Record.RuntimeRef.Initialize(LightweightSubsystem, Record.BuildableClass, Index);
+		return Record.RuntimeRef.IsValid();
 	}
 	// No match: the instance is genuinely gone (dismantled in-game while we
 	// weren't looking) - surface as 404 so Terraform plans a recreate.
@@ -109,12 +110,12 @@ bool ASTFRegistrySubsystem::RevalidateLightweightRef(FLightweightBuildableInstan
 
 const FLightweightBuildableInstanceRef* ASTFRegistrySubsystem::FindLightweight(const FString& TFID)
 {
-	FLightweightBuildableInstanceRef* Found = LightweightBuildables.Find(TFID);
-	if (!Found || !RevalidateLightweightRef(*Found))
+	FSTFLightweightRecord* Found = LightweightBuildables.Find(TFID);
+	if (!Found || !RevalidateLightweightRecord(*Found))
 	{
 		return nullptr;
 	}
-	return Found;
+	return &Found->RuntimeRef;
 }
 
 TArray<ASTFRegistrySubsystem::FEntry> ASTFRegistrySubsystem::GetAll()
@@ -132,11 +133,11 @@ TArray<ASTFRegistrySubsystem::FEntry> ASTFRegistrySubsystem::GetAll()
 	}
 	for (auto& Pair : LightweightBuildables)
 	{
-		if (RevalidateLightweightRef(Pair.Value))
+		if (RevalidateLightweightRecord(Pair.Value))
 		{
 			FEntry Entry;
 			Entry.TFID = Pair.Key;
-			Entry.LightweightRef = Pair.Value;
+			Entry.LightweightRef = Pair.Value.RuntimeRef;
 			Out.Add(MoveTemp(Entry));
 		}
 	}

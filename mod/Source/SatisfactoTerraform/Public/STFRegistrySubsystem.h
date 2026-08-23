@@ -30,6 +30,33 @@ struct FSTFConnectionEndpoints
 	int32 ToConnector = 0;
 };
 
+/** What the registry persists for a lightweight-tracked buildable.
+  *
+  * FLightweightBuildableInstanceRef itself CANNOT be persisted: none of its
+  * members (BuildableClass/Transform/LightweightBuildableID) carry the
+  * SaveGame flag, so a SaveGame-marked map of refs round-trips as empty
+  * structs - the root cause behind every past failure of issue #2 (both
+  * the id-reflection recovery and the first class+location recovery were
+  * healing refs that had loaded back blank). So the identity that must
+  * survive - class + where it is - lives in our own SaveGame-flagged
+  * fields, and the engine ref is a session-local cache re-resolved from
+  * them on first use each session. */
+USTRUCT()
+struct FSTFLightweightRecord
+{
+	GENERATED_BODY()
+
+	UPROPERTY(SaveGame)
+	TSubclassOf<AFGBuildable> BuildableClass;
+
+	UPROPERTY(SaveGame)
+	FTransform Transform;
+
+	/** Never saved (Transient); see RevalidateLightweightRecord. */
+	UPROPERTY(Transient)
+	FLightweightBuildableInstanceRef RuntimeRef;
+};
+
 /**
  * Maps Terraform-assigned IDs (tf_id) to the things the mod spawned for them.
  *
@@ -67,8 +94,8 @@ public:
 	AFGBuildable* Find(const FString& TFID) const;
 
 	/** Returns nullptr if the id is unknown, tracked as a full actor instead, or the instance is no longer valid
-	  * (after attempting to self-heal a stale owner-subsystem pointer left over from a previous session - see
-	  * RevalidateLightweightRef). Non-const because that self-heal writes back into the stored ref. */
+	  * (after re-resolving the session-local ref from the record's saved class+location - see
+	  * RevalidateLightweightRecord). Non-const because that re-resolve writes back into the stored record. */
 	const FLightweightBuildableInstanceRef* FindLightweight(const FString& TFID);
 
 	/** True if TFID resolves to a live entry in either representation - use for the POST duplicate-id (409) check. */
@@ -97,24 +124,21 @@ public:
 	virtual bool ShouldSave_Implementation() const override { return true; }
 
 private:
-	/** FLightweightBuildableInstanceRef caches a weak pointer to the
-	  * AFGLightweightBuildableSubsystem that existed when it was created -
-	  * that subsystem actor is recreated fresh every session, so a ref
-	  * deserialized from a save has a stale OwnerSubsystem even though the
-	  * underlying lightweight data (which the game itself saves) is fine.
-	  * Its saved integer id is equally untrustworthy after a reload (it's
-	  * an index the subsystem reshuffles on load - issue #2), so recovery
-	  * re-finds the instance by the ref's own saved class + location and
-	  * re-Initializes against the current session's subsystem. Returns
-	  * Ref's IsValid() after the attempt - false means the instance is
-	  * genuinely gone (e.g. dismantled in-game), and the API should 404. */
-	bool RevalidateLightweightRef(FLightweightBuildableInstanceRef& Ref) const;
+	/** Ensures Record.RuntimeRef points at a live instance in THIS
+	  * session's AFGLightweightBuildableSubsystem, re-finding it by the
+	  * record's saved class + location when the cached ref is dead (fresh
+	  * session) or was never resolved. Returns false when no matching
+	  * instance exists - genuinely gone (dismantled in-game), so the API
+	  * should 404 and Terraform plans a recreate. See FSTFLightweightRecord
+	  * for why recovery starts from our own saved fields, never from a
+	  * persisted engine ref. */
+	bool RevalidateLightweightRecord(FSTFLightweightRecord& Record) const;
 
 	UPROPERTY(SaveGame)
 	TMap<FString, AFGBuildable*> Buildables;
 
 	UPROPERTY(SaveGame)
-	TMap<FString, FLightweightBuildableInstanceRef> LightweightBuildables;
+	TMap<FString, FSTFLightweightRecord> LightweightBuildables;
 
 	UPROPERTY(SaveGame)
 	TMap<FString, FSTFConnectionEndpoints> ConnectionEndpoints;
