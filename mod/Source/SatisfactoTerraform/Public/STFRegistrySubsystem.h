@@ -3,17 +3,31 @@
 #include "CoreMinimal.h"
 #include "Subsystem/ModSubsystem.h"
 #include "FGSaveInterface.h"
+#include "FGLightweightBuildableSubsystem.h" // FLightweightBuildableInstanceRef
 #include "STFRegistrySubsystem.generated.h"
 
 class AFGBuildable;
 
 /**
- * Maps Terraform-assigned IDs (tf_id) to the actors the mod spawned for them.
+ * Maps Terraform-assigned IDs (tf_id) to the things the mod spawned for them.
  *
- * The map is marked SaveGame so the mapping survives save/load — that is what
- * makes `terraform plan` against a reloaded session see no drift. Actors that
- * were dismantled in-game resolve to null on lookup, which the API layer
- * reports as 404 (Terraform then plans a recreate).
+ * Two representations, mutually exclusive per tf_id: a full AFGBuildable*
+ * actor, or an FLightweightBuildableInstanceRef. The latter exists because
+ * Satisfactory's Lightweight Buildable system destroys simple structural
+ * buildables (foundations, walls, ramps, ...) shortly after spawning and
+ * migrates them to a memory-efficient non-actor representation - keeping
+ * them as full actors would work but costs real per-actor overhead (draw
+ * calls, replication, memory) at scale, so the mod converts them itself at
+ * spawn time (see STFApiServerSubsystem::SpawnBuildable) and tracks the
+ * resulting ref instead. FLightweightBuildableInstanceRef is a UE-provided
+ * USTRUCT explicitly documented as safe to store indefinitely without
+ * worrying about the referenced instance's lifetime.
+ *
+ * Both maps are SaveGame so tracking survives save/load. Actors that were
+ * dismantled in-game resolve to null on lookup (Find); lightweight
+ * instances that were removed in-game resolve IsValid()==false
+ * (FindLightweight) - both cases surface as 404 at the API layer, and
+ * Terraform plans a recreate.
  */
 UCLASS()
 class SATISFACTOTERRAFORM_API ASTFRegistrySubsystem : public AModSubsystem, public IFGSaveInterface
@@ -24,13 +38,29 @@ public:
 	static ASTFRegistrySubsystem* Get(UWorld* World);
 
 	void Register(const FString& TFID, AFGBuildable* Buildable);
+	void RegisterLightweight(const FString& TFID, const FLightweightBuildableInstanceRef& Ref);
 	void Unregister(const FString& TFID);
 
-	/** Returns nullptr if the id is unknown or the actor no longer exists. */
+	/** Returns nullptr if the id is unknown, tracked as a lightweight instead, or the actor no longer exists. */
 	AFGBuildable* Find(const FString& TFID) const;
 
-	/** All live tf_id -> buildable pairs (dead entries pruned). */
-	TMap<FString, AFGBuildable*> GetAll() const;
+	/** Returns nullptr if the id is unknown, tracked as a full actor instead, or the instance is no longer valid. */
+	const FLightweightBuildableInstanceRef* FindLightweight(const FString& TFID) const;
+
+	/** True if TFID resolves to a live entry in either representation - use for the POST duplicate-id (409) check. */
+	bool Contains(const FString& TFID) const { return Find(TFID) != nullptr || FindLightweight(TFID) != nullptr; }
+
+	/** One resolved entry from GetAll(): exactly one of Buildable/LightweightRef is meaningful, per IsLightweight(). */
+	struct FEntry
+	{
+		FString TFID;
+		AFGBuildable* Buildable = nullptr;
+		FLightweightBuildableInstanceRef LightweightRef;
+		bool IsLightweight() const { return Buildable == nullptr; }
+	};
+
+	/** All live tf_id entries across both representations (dead ones pruned). */
+	TArray<FEntry> GetAll() const;
 
 	// IFGSaveInterface: persist the registry in the save game.
 	virtual bool ShouldSave_Implementation() const override { return true; }
@@ -38,4 +68,7 @@ public:
 private:
 	UPROPERTY(SaveGame)
 	TMap<FString, AFGBuildable*> Buildables;
+
+	UPROPERTY(SaveGame)
+	TMap<FString, FLightweightBuildableInstanceRef> LightweightBuildables;
 };

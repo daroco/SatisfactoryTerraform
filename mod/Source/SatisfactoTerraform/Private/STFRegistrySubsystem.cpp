@@ -15,9 +15,15 @@ void ASTFRegistrySubsystem::Register(const FString& TFID, AFGBuildable* Buildabl
 	Buildables.Add(TFID, Buildable);
 }
 
+void ASTFRegistrySubsystem::RegisterLightweight(const FString& TFID, const FLightweightBuildableInstanceRef& Ref)
+{
+	LightweightBuildables.Add(TFID, Ref);
+}
+
 void ASTFRegistrySubsystem::Unregister(const FString& TFID)
 {
 	Buildables.Remove(TFID);
+	LightweightBuildables.Remove(TFID);
 }
 
 AFGBuildable* ASTFRegistrySubsystem::Find(const FString& TFID) const
@@ -30,14 +36,37 @@ AFGBuildable* ASTFRegistrySubsystem::Find(const FString& TFID) const
 	return *Found;
 }
 
-TMap<FString, AFGBuildable*> ASTFRegistrySubsystem::GetAll() const
+const FLightweightBuildableInstanceRef* ASTFRegistrySubsystem::FindLightweight(const FString& TFID) const
 {
-	TMap<FString, AFGBuildable*> Out;
+	const FLightweightBuildableInstanceRef* Found = LightweightBuildables.Find(TFID);
+	if (!Found || !Found->IsValid())
+	{
+		return nullptr;
+	}
+	return Found;
+}
+
+TArray<ASTFRegistrySubsystem::FEntry> ASTFRegistrySubsystem::GetAll() const
+{
+	TArray<FEntry> Out;
 	for (const auto& Pair : Buildables)
 	{
 		if (IsValid(Pair.Value))
 		{
-			Out.Add(Pair.Key, Pair.Value);
+			FEntry Entry;
+			Entry.TFID = Pair.Key;
+			Entry.Buildable = Pair.Value;
+			Out.Add(MoveTemp(Entry));
+		}
+	}
+	for (const auto& Pair : LightweightBuildables)
+	{
+		if (Pair.Value.IsValid())
+		{
+			FEntry Entry;
+			Entry.TFID = Pair.Key;
+			Entry.LightweightRef = Pair.Value;
+			Out.Add(MoveTemp(Entry));
 		}
 	}
 	return Out;

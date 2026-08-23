@@ -23,7 +23,8 @@
 #include "AssetRegistry/IAssetRegistry.h"
 #include "AssetRegistry/ARFilter.h"
 #include "Engine/Blueprint.h"
-#include "UObject/UnrealType.h"
+
+#include "FGLightweightBuildableSubsystem.h"
 
 namespace
 {
@@ -88,6 +89,27 @@ namespace
 			}
 			Json->SetNumberField(TEXT("clock_speed"), Manufacturer->GetPendingPotential());
 		}
+		return Json;
+	}
+
+	/** Same shape as BuildableToJson, for buildables tracked as a lightweight
+	  * instance instead of a full actor. Lightweight-eligible classes never
+	  * have a recipe/clock_speed (only AFGBuildableManufacturer does, and
+	  * manufacturers are never lightweight-eligible), so those fields are
+	  * simply omitted, same as BuildableToJson does for non-manufacturers. */
+	TSharedPtr<FJsonObject> LightweightToJson(const FString& TFID, const FLightweightBuildableInstanceRef& Ref)
+	{
+		const TSharedPtr<FJsonObject> Json = MakeShared<FJsonObject>();
+		Json->SetStringField(TEXT("tf_id"), TFID);
+		Json->SetStringField(TEXT("class"), Ref.GetBuildableClass()->GetName());
+		const TSharedPtr<FJsonObject> Transform = MakeShared<FJsonObject>();
+		const FTransform T = Ref.GetBuildableTransform();
+		const FVector Loc = T.GetLocation();
+		Transform->SetNumberField(TEXT("x"), Loc.X);
+		Transform->SetNumberField(TEXT("y"), Loc.Y);
+		Transform->SetNumberField(TEXT("z"), Loc.Z);
+		Transform->SetNumberField(TEXT("yaw"), T.Rotator().Yaw);
+		Json->SetObjectField(TEXT("transform"), Transform);
 		return Json;
 	}
 }
@@ -207,9 +229,11 @@ bool ASTFApiServerSubsystem::HandleBuildables(const FHttpServerRequest& Request,
 	if (Request.Verb == EHttpServerRequestVerbs::VERB_GET)
 	{
 		TArray<TSharedPtr<FJsonValue>> Items;
-		for (const auto& Pair : Registry->GetAll())
+		for (const auto& Entry : Registry->GetAll())
 		{
-			Items.Add(MakeShared<FJsonValueObject>(BuildableToJson(Pair.Key, Pair.Value)));
+			Items.Add(MakeShared<FJsonValueObject>(Entry.IsLightweight()
+				? LightweightToJson(Entry.TFID, Entry.LightweightRef)
+				: BuildableToJson(Entry.TFID, Entry.Buildable)));
 		}
 		FString Out;
 		const auto Writer = TJsonWriterFactory<>::Create(&Out);
@@ -247,47 +271,76 @@ bool ASTFApiServerSubsystem::HandleBuildableByID(const FHttpServerRequest& Reque
 	}
 	const FString TFID = PathID(Request);
 	ASTFRegistrySubsystem* Registry = ASTFRegistrySubsystem::Get(GetWorld());
-	AFGBuildable* Buildable = Registry->Find(TFID);
-	if (!Buildable)
-	{
-		OnComplete(ErrorResponse(404, TEXT("no buildable with that tf_id")));
-		return true;
-	}
 
-	if (Request.Verb == EHttpServerRequestVerbs::VERB_GET)
+	if (AFGBuildable* Buildable = Registry->Find(TFID))
 	{
-		OnComplete(JsonResponse(200, BuildableToJson(TFID, Buildable)));
-		return true;
-	}
-
-	if (Request.Verb == EHttpServerRequestVerbs::VERB_PATCH)
-	{
-		const TSharedPtr<FJsonObject> Body = ParseBody(Request);
-		if (!Body.IsValid())
+		if (Request.Verb == EHttpServerRequestVerbs::VERB_GET)
 		{
-			OnComplete(ErrorResponse(400, TEXT("invalid JSON")));
+			OnComplete(JsonResponse(200, BuildableToJson(TFID, Buildable)));
 			return true;
 		}
-		int32 Status = 200;
-		FString Error;
-		const TSharedPtr<FJsonObject> Result = PatchBuildable(Buildable, Body, TFID, Status, Error);
-		if (!Result.IsValid())
+
+		if (Request.Verb == EHttpServerRequestVerbs::VERB_PATCH)
 		{
-			OnComplete(ErrorResponse(Status, Error));
+			const TSharedPtr<FJsonObject> Body = ParseBody(Request);
+			if (!Body.IsValid())
+			{
+				OnComplete(ErrorResponse(400, TEXT("invalid JSON")));
+				return true;
+			}
+			int32 Status = 200;
+			FString Error;
+			const TSharedPtr<FJsonObject> Result = PatchBuildable(Buildable, Body, TFID, Status, Error);
+			if (!Result.IsValid())
+			{
+				OnComplete(ErrorResponse(Status, Error));
+				return true;
+			}
+			OnComplete(JsonResponse(200, Result));
 			return true;
 		}
-		OnComplete(JsonResponse(200, Result));
+
+		// DELETE — dismantle through IFGDismantleInterface when the buildable
+		// implements it (refunds + connection cleanup match vanilla
+		// behaviour), falling back to a plain Destroy() otherwise.
+		Registry->Unregister(TFID);
+		DismantleBuildable(Buildable);
+		auto Response = FHttpServerResponse::Create(TEXT(""), TEXT("application/json"));
+		Response->Code = EHttpServerResponseCodes::NoContent;
+		OnComplete(MoveTemp(Response));
 		return true;
 	}
 
-	// DELETE — dismantle through IFGDismantleInterface when the buildable
-	// implements it (refunds + connection cleanup match vanilla behaviour),
-	// falling back to a plain Destroy() otherwise.
-	Registry->Unregister(TFID);
-	DismantleBuildable(Buildable);
-	auto Response = FHttpServerResponse::Create(TEXT(""), TEXT("application/json"));
-	Response->Code = EHttpServerResponseCodes::NoContent;
-	OnComplete(MoveTemp(Response));
+	if (const FLightweightBuildableInstanceRef* Ref = Registry->FindLightweight(TFID))
+	{
+		if (Request.Verb == EHttpServerRequestVerbs::VERB_GET)
+		{
+			OnComplete(JsonResponse(200, LightweightToJson(TFID, *Ref)));
+			return true;
+		}
+
+		if (Request.Verb == EHttpServerRequestVerbs::VERB_PATCH)
+		{
+			// Lightweight-eligible classes (foundations, walls, ...) never
+			// have a recipe/clock_speed - same 422 a non-manufacturer full
+			// actor gets from PatchBuildable.
+			OnComplete(ErrorResponse(422, TEXT("this buildable has no recipe/clock_speed to patch")));
+			return true;
+		}
+
+		// DELETE — FLightweightBuildableInstanceRef::Remove() is the
+		// lightweight subsystem's own removal path; copy the ref first since
+		// Remove() is non-const and the registry only hands out const access.
+		FLightweightBuildableInstanceRef MutableRef = *Ref;
+		Registry->Unregister(TFID);
+		MutableRef.Remove();
+		auto Response = FHttpServerResponse::Create(TEXT(""), TEXT("application/json"));
+		Response->Code = EHttpServerResponseCodes::NoContent;
+		OnComplete(MoveTemp(Response));
+		return true;
+	}
+
+	OnComplete(ErrorResponse(404, TEXT("no buildable with that tf_id")));
 	return true;
 }
 
@@ -470,7 +523,7 @@ TSharedPtr<FJsonObject> ASTFApiServerSubsystem::SpawnBuildable(const TSharedPtr<
 		return nullptr;
 	}
 	ASTFRegistrySubsystem* Registry = ASTFRegistrySubsystem::Get(GetWorld());
-	if (Registry->Find(TFID))
+	if (Registry->Contains(TFID))
 	{
 		OutStatus = 409;
 		OutError = FString::Printf(TEXT("buildable with tf_id %s already exists"), *TFID);
@@ -533,21 +586,6 @@ TSharedPtr<FJsonObject> ASTFApiServerSubsystem::SpawnBuildable(const TSharedPtr<
 		return nullptr;
 	}
 
-	// Prevent this instance from being converted to a "lightweight" (non-
-	// actor, instanced-mesh) representation - simple structural buildables
-	// (foundations, walls, ramps, ...) get destroyed and migrated there
-	// shortly after spawning, which orphans our registry's actor pointer.
-	// mManagedByLightweightBuildableSubsystem is protected on AFGBuildable,
-	// but it's a UPROPERTY, so reflection can flip it per-instance without
-	// touching the global toggle or any other buildable (including the
-	// player's own) - confirmed live: foundations 404'd on GET after the
-	// game destroyed them for lightweight conversion; machines, which
-	// default this flag false, were never affected.
-	if (FBoolProperty* LightweightProp = FindFProperty<FBoolProperty>(AFGBuildable::StaticClass(), TEXT("mManagedByLightweightBuildableSubsystem")))
-	{
-		LightweightProp->SetPropertyValue_InContainer(Buildable, false);
-	}
-
 	Buildable->FinishSpawning(Transform);
 
 	// Recipe/clock_speed applied AFTER FinishSpawning, not between
@@ -564,6 +602,38 @@ TSharedPtr<FJsonObject> ASTFApiServerSubsystem::SpawnBuildable(const TSharedPtr<
 			Manufacturer->SetRecipe(RecipeClass);
 		}
 		Manufacturer->SetPendingPotential(ClockSpeed);
+	}
+
+	// Simple structural buildables (foundations, walls, ramps, ...) are
+	// eligible for Satisfactory's Lightweight Buildable system, which
+	// destroys the actor and migrates it to a memory-efficient non-actor
+	// representation shortly after spawning (matching vanilla performance
+	// at scale - manufacturers are never eligible, so this never applies to
+	// them). Rather than race that async, build-effect-triggered
+	// conversion, convert deterministically ourselves right now and keep
+	// the resulting FLightweightBuildableInstanceRef instead of the
+	// (about to be invalid) actor pointer. This mirrors the real
+	// AFGBuildable::HandleLightweightAddition() - which is protected, so
+	// not callable directly - using only its public building blocks
+	// (confirmed against the real implementation).
+	if (Buildable->ManagedByLightweightBuildableSubsystem())
+	{
+		AFGLightweightBuildableSubsystem* LightweightSubsystem = AFGLightweightBuildableSubsystem::Get(GetWorld());
+		const int32 RuntimeIndex = LightweightSubsystem->AddFromBuildable(Buildable);
+		if (RuntimeIndex != INDEX_NONE)
+		{
+			FLightweightBuildableInstanceRef Ref;
+			Ref.Initialize(LightweightSubsystem, Class, RuntimeIndex);
+			Buildable->SetIsStaleLightweightTemporary(); // destruction below isn't a real dismantle
+			Buildable->Destroy();
+
+			Registry->RegisterLightweight(TFID, Ref);
+			UE_LOG(LogSatisfactoTerraform, Log, TEXT("Spawned %s as %s (lightweight)"), *Class->GetName(), *TFID);
+			OutStatus = 201;
+			return LightweightToJson(TFID, Ref);
+		}
+		// AddFromBuildable failed (index INDEX_NONE) - fall through and keep
+		// the buildable as a regular full-actor registration below.
 	}
 
 	Registry->Register(TFID, Buildable);
