@@ -106,9 +106,12 @@ resource "satisfactory_belt" "hub_core" {
 
 locals {
   producers = {
-    west  = { x = local.center_x - 2400, y = local.center_y, merger_connector = 0 }        # merger back input
-    south = { x = local.center_x - 400, y = local.center_y + 2400, merger_connector = 2 } # merger +y input
-    north = { x = local.center_x - 400, y = local.center_y - 2400, merger_connector = 3 } # merger -y input
+    # yaw turns the machine so its output connector faces the hub (adjusted
+    # by eye against the live build - every map entry needs the key, since
+    # Terraform requires map-of-object entries to share one shape).
+    west  = { x = local.center_x - 2400, y = local.center_y, merger_connector = 0, yaw = 90 }     # merger back input
+    south = { x = local.center_x - 400, y = local.center_y + 2400, merger_connector = 2, yaw = 0 } # merger +y input
+    north = { x = local.center_x - 400, y = local.center_y - 2400, merger_connector = 3, yaw = 0 } # merger -y input
   }
 }
 
@@ -119,6 +122,7 @@ resource "satisfactory_building" "producer" {
   x        = each.value.x
   y        = each.value.y
   z        = local.build_z
+  yaw      = each.value.yaw
 }
 
 resource "satisfactory_belt" "inbound" {
@@ -134,9 +138,10 @@ resource "satisfactory_belt" "inbound" {
 
 locals {
   consumers = {
-    east  = { x = local.center_x + 2400, y = local.center_y, splitter_connector = 0 }        # splitter front output
-    south = { x = local.center_x + 400, y = local.center_y + 2400, splitter_connector = 2 } # splitter +y output
-    north = { x = local.center_x + 400, y = local.center_y - 2400, splitter_connector = 3 } # splitter -y output
+    # yaw: see the note on local.producers.
+    east  = { x = local.center_x + 2400, y = local.center_y, splitter_connector = 0, yaw = 90 }    # splitter front output
+    south = { x = local.center_x + 400, y = local.center_y + 2400, splitter_connector = 2, yaw = 0 } # splitter +y output
+    north = { x = local.center_x + 400, y = local.center_y - 2400, splitter_connector = 3, yaw = 0 } # splitter -y output
   }
 }
 
@@ -147,6 +152,7 @@ resource "satisfactory_building" "consumer" {
   x        = each.value.x
   y        = each.value.y
   z        = local.build_z
+  yaw      = each.value.yaw
 }
 
 resource "satisfactory_belt" "outbound" {

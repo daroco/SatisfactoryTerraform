@@ -101,7 +101,14 @@ func (r *foundationResource) Create(ctx context.Context, req resource.CreateRequ
 		resp.Diagnostics.AddError("Failed to place foundation", err.Error())
 		return
 	}
-	resp.Diagnostics.Append(resp.State.Set(ctx, foundationFromAPI(created))...)
+	// See preserveWithinEpsilon (resource_building.go): keep plan values
+	// when the mod's echo differs only by float round-trip noise.
+	next := foundationFromAPI(created)
+	next.X = preserveWithinEpsilon(plan.X, next.X)
+	next.Y = preserveWithinEpsilon(plan.Y, next.Y)
+	next.Z = preserveWithinEpsilon(plan.Z, next.Z)
+	next.Yaw = preserveWithinEpsilon(plan.Yaw, next.Yaw)
+	resp.Diagnostics.Append(resp.State.Set(ctx, next)...)
 }
 
 func foundationFromAPI(b api.Buildable) foundationModel {

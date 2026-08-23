@@ -148,7 +148,16 @@ func (r *buildingResource) Create(ctx context.Context, req resource.CreateReques
 		resp.Diagnostics.AddError("Failed to spawn building", err.Error())
 		return
 	}
-	resp.Diagnostics.Append(resp.State.Set(ctx, buildingFromAPI(created))...)
+	// Same float32/rotator round-trip noise as Read (see
+	// preserveWithinEpsilon): the mod echoes yaw 90 back as
+	// 89.99999999999999, which the framework rejects as an inconsistent
+	// result unless we keep the plan's value for within-noise echoes.
+	next := buildingFromAPI(created)
+	next.X = preserveWithinEpsilon(plan.X, next.X)
+	next.Y = preserveWithinEpsilon(plan.Y, next.Y)
+	next.Z = preserveWithinEpsilon(plan.Z, next.Z)
+	next.Yaw = preserveWithinEpsilon(plan.Yaw, next.Yaw)
+	resp.Diagnostics.Append(resp.State.Set(ctx, next)...)
 }
 
 func (r *buildingResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
@@ -191,7 +200,13 @@ func (r *buildingResource) Update(ctx context.Context, req resource.UpdateReques
 		resp.Diagnostics.AddError("Failed to update building", err.Error())
 		return
 	}
-	resp.Diagnostics.Append(resp.State.Set(ctx, buildingFromAPI(updated))...)
+	// See Create: absorb transform echo noise against the plan.
+	next := buildingFromAPI(updated)
+	next.X = preserveWithinEpsilon(plan.X, next.X)
+	next.Y = preserveWithinEpsilon(plan.Y, next.Y)
+	next.Z = preserveWithinEpsilon(plan.Z, next.Z)
+	next.Yaw = preserveWithinEpsilon(plan.Yaw, next.Yaw)
+	resp.Diagnostics.Append(resp.State.Set(ctx, next)...)
 }
 
 func (r *buildingResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
