@@ -37,18 +37,23 @@ provider "satisfactory" {
 }
 
 locals {
-  base_z   = 20000
+  # Centered on the player's location (debug HUD: V(X=-81932.75,
+  # Y=223819.48, Z=-371.75)) rather than world origin, so the hub actually
+  # lands where whoever applies this is standing. base_z uses the player's
+  # own Z as the foundation top, same as the earlier single-foundation
+  # smoke test that landed "literally right on top of me."
+  base_z   = -371.75
   build_z  = local.base_z + 100
-  center_x = 3200
-  center_y = 3200
+  center_x = -81932.75
+  center_y = 223819.48
 }
 
-# 64m x 64m floor (8x8 tiles of an 8x8m foundation) - plenty of room left
-# over for more machines beyond the 6 wired up here.
+# 64m x 64m floor (8x8 tiles of an 8x8m foundation) centered on the player -
+# plenty of room left over for more machines beyond the 6 wired up here.
 module "floor" {
   source  = "../../modules/grid-2d"
-  from    = { x = 0, y = 0 }
-  to      = { x = 6400, y = 6400 }
+  from    = { x = local.center_x - 3200, y = local.center_y - 3200 }
+  to      = { x = local.center_x + 3200, y = local.center_y + 3200 }
   spacing = 800
 }
 
@@ -88,9 +93,9 @@ resource "satisfactory_belt" "hub_core" {
 
 locals {
   producers = {
-    west  = { x = 800, y = local.center_y, merger_connector = 0 } # merger back input
-    south = { x = local.center_x - 400, y = 5600, merger_connector = 2 } # merger +y input
-    north = { x = local.center_x - 400, y = 800, merger_connector = 3 } # merger -y input
+    west  = { x = local.center_x - 2400, y = local.center_y, merger_connector = 0 }        # merger back input
+    south = { x = local.center_x - 400, y = local.center_y + 2400, merger_connector = 2 } # merger +y input
+    north = { x = local.center_x - 400, y = local.center_y - 2400, merger_connector = 3 } # merger -y input
   }
 }
 
@@ -116,9 +121,9 @@ resource "satisfactory_belt" "inbound" {
 
 locals {
   consumers = {
-    east  = { x = 5600, y = local.center_y, splitter_connector = 0 } # splitter front output
-    south = { x = local.center_x + 400, y = 5600, splitter_connector = 2 } # splitter +y output
-    north = { x = local.center_x + 400, y = 800, splitter_connector = 3 } # splitter -y output
+    east  = { x = local.center_x + 2400, y = local.center_y, splitter_connector = 0 }        # splitter front output
+    south = { x = local.center_x + 400, y = local.center_y + 2400, splitter_connector = 2 } # splitter +y output
+    north = { x = local.center_x + 400, y = local.center_y - 2400, splitter_connector = 3 } # splitter -y output
   }
 }
 
