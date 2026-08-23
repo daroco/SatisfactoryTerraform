@@ -96,12 +96,26 @@ func (s *Server) createBuildable(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnprocessableEntity, "recipe must be a recipe class name like Recipe_IronPlate_C")
 		return
 	}
-	if b.ClockSpeed == 0 {
-		b.ClockSpeed = 1.0
-	}
-	if b.ClockSpeed < 0.01 || b.ClockSpeed > 2.5 {
-		writeErr(w, http.StatusUnprocessableEntity, "clock_speed must be between 0.01 and 2.5")
-		return
+	if isManufacturerClass(b.Class) {
+		if b.ClockSpeed == 0 {
+			b.ClockSpeed = 1.0
+		}
+		if b.ClockSpeed < 0.01 || b.ClockSpeed > 2.5 {
+			writeErr(w, http.StatusUnprocessableEntity, "clock_speed must be between 0.01 and 2.5")
+			return
+		}
+	} else {
+		// The real mod only reports recipe/clock_speed for buildables that
+		// are manufacturers (AFGBuildableManufacturer); for everything else
+		// (foundations, splitters, mergers, power poles, ...) any requested
+		// values are silently ignored at spawn and the fields are omitted
+		// from every response. Zeroing them here + `omitempty` on the wire
+		// types reproduces that shape exactly - so a config that sets
+		// recipe/clock_speed on a non-manufacturer class fails CI the same
+		// way it would fail live (provider sees a response that doesn't
+		// echo the plan), instead of passing against a too-lenient mock.
+		b.Recipe = ""
+		b.ClockSpeed = 0
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -135,6 +149,12 @@ func (s *Server) patchBuildable(w http.ResponseWriter, r *http.Request) {
 	b, ok := s.buildables[r.PathValue("tf_id")]
 	if !ok {
 		writeErr(w, http.StatusNotFound, "no buildable with that tf_id")
+		return
+	}
+	if !isManufacturerClass(b.Class) {
+		// Mirrors the real mod's PatchBuildable: only manufacturers have a
+		// recipe/clock to patch; same message, same 422.
+		writeErr(w, http.StatusUnprocessableEntity, "this buildable has no recipe/clock_speed to patch")
 		return
 	}
 	if p.Recipe != nil {
@@ -246,6 +266,43 @@ func (s *Server) deleteConnection(w http.ResponseWriter, r *http.Request) {
 // validClass approximates the game's class naming: prefix + name + "_C".
 func validClass(class, prefix string) bool {
 	return strings.HasPrefix(class, prefix) && strings.HasSuffix(class, "_C") && len(class) > len(prefix)+2
+}
+
+// manufacturerClassPrefixes lists the vanilla AFGBuildableManufacturer
+// families - the buildables that actually have a recipe/clock_speed in the
+// real mod's responses.
+//
+// This is a deliberate, narrow exception to the project rule against baking
+// game-content tables into provider-side code (CLAUDE.md "Conventions"): the
+// rule exists so new game content works without a provider release, and that
+// still holds - the provider itself validates nothing, and an unknown class
+// is still passed straight through to the game. This list only shapes the
+// *mock's* responses so CI reproduces the real mod's
+// manufacturer-vs-not behavior (fields omitted, PATCH 422) instead of
+// masking that class of bug; a new manufacturer the list doesn't know about
+// merely makes the mock strict where the game would be lenient, which fails
+// loud in CI rather than silently diverging live.
+var manufacturerClassPrefixes = []string{
+	"Build_SmelterMk",
+	"Build_FoundryMk",
+	"Build_ConstructorMk",
+	"Build_AssemblerMk",
+	"Build_ManufacturerMk",
+	"Build_OilRefinery",
+	"Build_Packager",
+	"Build_Blender",
+	"Build_HadronCollider",
+	"Build_Converter",
+	"Build_QuantumEncoder",
+}
+
+func isManufacturerClass(class string) bool {
+	for _, p := range manufacturerClassPrefixes {
+		if strings.HasPrefix(class, p) {
+			return true
+		}
+	}
+	return false
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

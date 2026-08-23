@@ -195,11 +195,18 @@ components:
         transform: { $ref: "#/components/schemas/Transform" }
         recipe:
           type: string
-          description: Recipe class name for production machines, e.g. Recipe_IronPlate_C.
+          description: >
+            Recipe class name for production machines, e.g. Recipe_IronPlate_C.
+            Only present on manufacturer buildables (constructors, smelters,
+            assemblers, ...); omitted from every response for other classes,
+            and silently ignored if supplied when spawning one.
         clock_speed:
           type: number
-          default: 1.0
-          description: Clock speed as a fraction (1.0 = 100%).
+          description: >
+            Clock speed as a fraction (1.0 = 100%). Only present on
+            manufacturer buildables, where it defaults to 1.0 on create;
+            omitted from every response for other classes (there is no
+            universal default - a splitter simply has no clock).
     ConnectionEndpoint:
       type: object
       required: [buildable_tf_id, connector]

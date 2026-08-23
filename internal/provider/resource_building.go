@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"math"
 
 	"github.com/google/uuid"
 	"github.com/hashicorp/terraform-plugin-framework/path"
@@ -166,7 +167,12 @@ func (r *buildingResource) Read(ctx context.Context, req resource.ReadRequest, r
 		resp.Diagnostics.AddError("Failed to read building", err.Error())
 		return
 	}
-	resp.Diagnostics.Append(resp.State.Set(ctx, buildingFromAPI(b))...)
+	next := buildingFromAPI(b)
+	next.X = preserveWithinEpsilon(state.X, next.X)
+	next.Y = preserveWithinEpsilon(state.Y, next.Y)
+	next.Z = preserveWithinEpsilon(state.Z, next.Z)
+	next.Yaw = preserveWithinEpsilon(state.Yaw, next.Yaw)
+	resp.Diagnostics.Append(resp.State.Set(ctx, next)...)
 }
 
 func (r *buildingResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
@@ -201,6 +207,30 @@ func (r *buildingResource) Delete(ctx context.Context, req resource.DeleteReques
 
 func (r *buildingResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
 	resource.ImportStatePassthroughID(ctx, path.Root("id"), req, resp)
+}
+
+// transformEpsilon (in the transform's own units: centimetres for x/y/z,
+// degrees for yaw) absorbs the float32 quantization the game's save/load
+// round-trip applies to actor transforms. Confirmed live (issue #10): a
+// building created at x = -224375.55 reads back as -224375.55 within the
+// same session, but -224375.546875 after a quit/relaunch - a pure precision
+// artifact, not real movement. Without this, every non-integer coordinate
+// becomes permanent replace-drift after the first reload, since x/y/z/yaw
+// all RequiresReplace. 0.5 is far above the worst quantization error at
+// map-scale coordinates (float32 ULP at ~500km is ~0.06cm) and far below
+// any difference that could mean an actually-moved buildable.
+const transformEpsilon = 0.5
+
+// preserveWithinEpsilon keeps the state's value when the API's reading
+// differs only by float32 round-trip noise, so Read doesn't manufacture
+// drift; a genuinely different value (in-game movement, manual state edits)
+// still comes through.
+func preserveWithinEpsilon(state, api types.Float64) types.Float64 {
+	if !state.IsNull() && !state.IsUnknown() &&
+		math.Abs(state.ValueFloat64()-api.ValueFloat64()) < transformEpsilon {
+		return state
+	}
+	return api
 }
 
 // configureClient extracts the shared API client from provider configure data.

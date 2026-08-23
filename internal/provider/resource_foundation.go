@@ -130,7 +130,14 @@ func (r *foundationResource) Read(ctx context.Context, req resource.ReadRequest,
 		resp.Diagnostics.AddError("Failed to read foundation", err.Error())
 		return
 	}
-	resp.Diagnostics.Append(resp.State.Set(ctx, foundationFromAPI(b))...)
+	// See preserveWithinEpsilon (resource_building.go): absorb float32
+	// save/load quantization so reloads don't read as replace-drift.
+	next := foundationFromAPI(b)
+	next.X = preserveWithinEpsilon(state.X, next.X)
+	next.Y = preserveWithinEpsilon(state.Y, next.Y)
+	next.Z = preserveWithinEpsilon(state.Z, next.Z)
+	next.Yaw = preserveWithinEpsilon(state.Yaw, next.Yaw)
+	resp.Diagnostics.Append(resp.State.Set(ctx, next)...)
 }
 
 // Update is never called: every attribute forces replacement.

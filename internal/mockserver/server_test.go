@@ -222,31 +222,42 @@ func TestBuildableErrorContract(t *testing.T) {
 	}
 }
 
-// TestBuildableClockSpeedDefaultIgnoresClass documents a known, deliberate
-// mock/real-mod fidelity gap: the real mod only reports (and the provider
-// only meaningfully applies) clock_speed for buildables that successfully
-// Cast<AFGBuildableManufacturer> - splitters, mergers, power poles, etc.
-// never get the field. This mock, by contrast, defaults ClockSpeed to 1.0
-// for *any* class unconditionally (see createBuildable in server.go around
-// the `if b.ClockSpeed == 0` check), so it can never reproduce the
-// "field omitted for a non-manufacturer" response the provider's Create()
-// default-handling in resource_building.go is actually guarding against.
-// That gap is out of scope here (tracked, not yet fixed); this test just
-// pins down the mock's current behavior so a future fix is a deliberate,
-// visible change rather than a silent one. The field-omission scenario
-// itself is covered independently at the api marshaling layer
-// (internal/api/types_test.go) and at the provider layer with a
-// purpose-built fake server (internal/provider/provider_test.go).
-func TestBuildableClockSpeedDefaultIgnoresClass(t *testing.T) {
+// TestBuildableManufacturerFidelity pins the mock's manufacturer-vs-not
+// behavior to the real mod's (issues #5/#8): manufacturers get a 1.0
+// clock_speed default and accept PATCH; everything else has recipe/clock
+// silently dropped on create (so both fields are omitted from responses,
+// decoding to zero values) and 422s on PATCH with the mod's own message.
+func TestBuildableManufacturerFidelity(t *testing.T) {
 	c := newTestClient(t)
 	ctx := context.Background()
 
-	created, err := c.CreateBuildable(ctx, api.Buildable{TFID: "s-1", Class: "Build_SplitterMk1_C"})
+	smelter, err := c.CreateBuildable(ctx, api.Buildable{TFID: "man-1", Class: "Build_SmelterMk1_C"})
 	if err != nil {
-		t.Fatalf("create: %v", err)
+		t.Fatalf("create manufacturer: %v", err)
 	}
-	if created.ClockSpeed != 1.0 {
-		t.Errorf("mock ClockSpeed default = %v, want 1.0 even for a non-manufacturer class (known fidelity gap)", created.ClockSpeed)
+	if smelter.ClockSpeed != 1.0 {
+		t.Errorf("manufacturer ClockSpeed default = %v, want 1.0", smelter.ClockSpeed)
+	}
+
+	// Non-manufacturer: requested recipe/clock are ignored, not stored -
+	// exactly what the real mod's Cast<AFGBuildableManufacturer> miss does.
+	merger, err := c.CreateBuildable(ctx, api.Buildable{
+		TFID: "att-1", Class: "Build_ConveyorAttachmentMerger_C",
+		Recipe: "Recipe_IronPlate_C", ClockSpeed: 1.5,
+	})
+	if err != nil {
+		t.Fatalf("create non-manufacturer: %v", err)
+	}
+	if merger.ClockSpeed != 0 || merger.Recipe != "" {
+		t.Errorf("non-manufacturer echoed recipe=%q clock=%v, want both omitted (zero)", merger.Recipe, merger.ClockSpeed)
+	}
+
+	clock := 2.0
+	if _, err := c.PatchBuildable(ctx, "att-1", api.BuildablePatch{ClockSpeed: &clock}); err == nil {
+		t.Error("PATCH on a non-manufacturer should 422, same as the real mod")
+	}
+	if _, err := c.PatchBuildable(ctx, "man-1", api.BuildablePatch{ClockSpeed: &clock}); err != nil {
+		t.Errorf("PATCH on a manufacturer should still work: %v", err)
 	}
 }
 
