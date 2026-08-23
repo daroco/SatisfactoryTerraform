@@ -301,6 +301,16 @@ bool ASTFApiServerSubsystem::HandleBuildables(const FHttpServerRequest& Request,
 		TArray<TSharedPtr<FJsonValue>> Items;
 		for (const auto& Entry : Registry->GetAll())
 		{
+			// Belts/power lines share the registry with plain buildables
+			// (distinguished by having connection-endpoint metadata) but
+			// belong to /api/v1/connections, where they're serialized with
+			// their from/to shape - listing them here too mixed the two
+			// response schemas in one array (issue #6). Same filter
+			// HandleConnections uses, inverted.
+			if (Registry->FindConnectionEndpoints(Entry.TFID))
+			{
+				continue;
+			}
 			Items.Add(MakeShared<FJsonValueObject>(Entry.IsLightweight()
 				? LightweightToJson(Entry.TFID, Entry.LightweightRef)
 				: BuildableToJson(Entry.TFID, Entry.Buildable)));
