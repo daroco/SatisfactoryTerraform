@@ -23,6 +23,7 @@
 #include "AssetRegistry/IAssetRegistry.h"
 #include "AssetRegistry/ARFilter.h"
 #include "Engine/Blueprint.h"
+#include "UObject/UnrealType.h"
 
 namespace
 {
@@ -531,6 +532,22 @@ TSharedPtr<FJsonObject> ASTFApiServerSubsystem::SpawnBuildable(const TSharedPtr<
 		OutError = TEXT("game refused to spawn that buildable");
 		return nullptr;
 	}
+
+	// Prevent this instance from being converted to a "lightweight" (non-
+	// actor, instanced-mesh) representation - simple structural buildables
+	// (foundations, walls, ramps, ...) get destroyed and migrated there
+	// shortly after spawning, which orphans our registry's actor pointer.
+	// mManagedByLightweightBuildableSubsystem is protected on AFGBuildable,
+	// but it's a UPROPERTY, so reflection can flip it per-instance without
+	// touching the global toggle or any other buildable (including the
+	// player's own) - confirmed live: foundations 404'd on GET after the
+	// game destroyed them for lightweight conversion; machines, which
+	// default this flag false, were never affected.
+	if (FBoolProperty* LightweightProp = FindFProperty<FBoolProperty>(AFGBuildable::StaticClass(), TEXT("mManagedByLightweightBuildableSubsystem")))
+	{
+		LightweightProp->SetPropertyValue_InContainer(Buildable, false);
+	}
+
 	Buildable->FinishSpawning(Transform);
 
 	// Recipe/clock_speed applied AFTER FinishSpawning, not between
