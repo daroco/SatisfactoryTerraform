@@ -122,16 +122,18 @@ func TestConnectionLifecycle(t *testing.T) {
 		t.Error("connection to unknown buildable should 422")
 	}
 
-	// A buildable with an attached connection must not be deletable.
-	if err := c.DeleteBuildable(ctx, "m-1"); err == nil {
-		t.Error("deleting buildable with attached connection should 409")
-	}
-
-	if err := c.DeleteConnection(ctx, "c-1"); err != nil {
-		t.Fatalf("delete connection: %v", err)
-	}
+	// Deleting a buildable with an attached connection is allowed - matches
+	// the real mod/game (dismantling a connected buildable isn't blocked,
+	// the belt just dangles) - but the connection it was part of should no
+	// longer resolve afterward, since one of its endpoints is now gone.
 	if err := c.DeleteBuildable(ctx, "m-1"); err != nil {
-		t.Errorf("delete buildable after connection removed: %v", err)
+		t.Fatalf("delete buildable with attached connection: %v", err)
+	}
+	if _, err := c.GetConnection(ctx, "c-1"); !client.IsNotFound(err) {
+		t.Errorf("connection referencing a deleted buildable should now 404, got: %v", err)
+	}
+	if err := c.DeleteBuildable(ctx, "m-2"); err != nil {
+		t.Errorf("delete remaining buildable: %v", err)
 	}
 }
 

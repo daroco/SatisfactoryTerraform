@@ -378,7 +378,19 @@ bool ASTFApiServerSubsystem::HandleBuildableByID(const FHttpServerRequest& Reque
 		// Remove() is non-const and the registry only hands out const access.
 		FLightweightBuildableInstanceRef MutableRef = *Ref;
 		Registry->Unregister(TFID);
-		MutableRef.Remove();
+		if (!MutableRef.Remove())
+		{
+			// Confirmed live: this can fail silently while the registry
+			// entry is already gone, orphaning a visible-but-untracked
+			// instance in the world with no tf_id left to remove it
+			// through. Nothing left to roll back to (Unregister already
+			// happened and re-registering under the same tf_id risks a
+			// worse state) - just make it loud so it's diagnosable instead
+			// of silently vanishing.
+			UE_LOG(LogSatisfactoTerraform, Warning,
+				TEXT("Lightweight buildable %s: registry entry removed but the underlying instance's own Remove() reported failure - it may still be visible in-game, untracked"),
+				*TFID);
+		}
 		auto Response = FHttpServerResponse::Create(TEXT(""), TEXT("application/json"));
 		Response->Code = EHttpServerResponseCodes::NoContent;
 		OnComplete(MoveTemp(Response));
@@ -858,11 +870,22 @@ TSharedPtr<FJsonObject> ASTFApiServerSubsystem::SpawnConnection(const TSharedPtr
 		Strategy->PostSpawnBuildable(Belt);
 
 		// SetConnection's real (compiled-game) implementation isn't visible
-		// from this source-available stub; call from both ends so the
+		// from this source-available stub and returns void, so there's no
+		// direct success/failure signal - call from both ends so the
 		// connection is correct regardless of whether it's one- or
-		// two-sided internally.
+		// two-sided internally, then verify via GetConnection() (a plain
+		// inline accessor, not a stub) that both ends actually ended up
+		// pointing at each other before declaring success.
 		FromConn->SetConnection(ToConn);
 		ToConn->SetConnection(FromConn);
+
+		if (FromConn->GetConnection() != ToConn || ToConn->GetConnection() != FromConn)
+		{
+			Belt->Destroy();
+			OutStatus = 422;
+			OutError = TEXT("game refused to connect those factory connectors (already connected to something else?)");
+			return nullptr;
+		}
 
 		Connection = Belt;
 	}

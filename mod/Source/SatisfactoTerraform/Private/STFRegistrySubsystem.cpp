@@ -26,6 +26,26 @@ void ASTFRegistrySubsystem::Unregister(const FString& TFID)
 	Buildables.Remove(TFID);
 	LightweightBuildables.Remove(TFID);
 	ConnectionEndpoints.Remove(TFID);
+
+	// A connection's own tf_id was just handled above; this instead prunes
+	// any OTHER connection whose From/To still points at the buildable
+	// being deleted here, so it doesn't keep resolving to a dead tf_id on
+	// GET forever. The real game allows dismantling a connected buildable
+	// (the belt/wire itself just goes along for the ride or dangles), so
+	// this only cleans up our own bookkeeping - it doesn't try to prevent
+	// the deletion the way the mock's fake 409 does.
+	TArray<FString> StaleConnectionIDs;
+	for (const auto& Pair : ConnectionEndpoints)
+	{
+		if (Pair.Value.FromTFID == TFID || Pair.Value.ToTFID == TFID)
+		{
+			StaleConnectionIDs.Add(Pair.Key);
+		}
+	}
+	for (const FString& StaleID : StaleConnectionIDs)
+	{
+		ConnectionEndpoints.Remove(StaleID);
+	}
 }
 
 AFGBuildable* ASTFRegistrySubsystem::Find(const FString& TFID) const

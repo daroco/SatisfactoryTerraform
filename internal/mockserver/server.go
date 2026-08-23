@@ -163,13 +163,17 @@ func (s *Server) deleteBuildable(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "no buildable with that tf_id")
 		return
 	}
-	for _, c := range s.connections {
+	delete(s.buildables, id)
+	// Matches the real mod: dismantling a connected buildable is allowed
+	// (the belt/wire just dangles), it's not blocked with a 409 - but any
+	// connection that referenced this id would otherwise keep resolving to
+	// a dead tf_id on GET forever, so prune those the same way the mod's
+	// Unregister does.
+	for tfid, c := range s.connections {
 		if c.From.BuildableTFID == id || c.To.BuildableTFID == id {
-			writeErr(w, http.StatusConflict, "buildable still has connection "+c.TFID+" attached")
-			return
+			delete(s.connections, tfid)
 		}
 	}
-	delete(s.buildables, id)
 	w.WriteHeader(http.StatusNoContent)
 }
 
