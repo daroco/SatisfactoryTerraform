@@ -37,15 +37,18 @@ provider "satisfactory" {
 }
 
 locals {
-  # Centered on the player's location (debug HUD: V(X=-81932.75,
-  # Y=223819.48, Z=-371.75)) rather than world origin, so the hub actually
-  # lands where whoever applies this is standing. base_z uses the player's
-  # own Z as the foundation top, same as the earlier single-foundation
-  # smoke test that landed "literally right on top of me."
-  base_z   = -371.75
+  # Centered on the player's location (debug HUD: V(X=-223975.55,
+  # Y=-31243.68, Z=5793.27), creative-mode save) rather than world origin,
+  # so the hub actually lands where whoever applies this is standing.
+  # base_z uses the player's own Z as the foundation top, same as the
+  # earlier single-foundation smoke test that landed "literally right on
+  # top of me." Update these three values (and re-apply) any time this
+  # example moves to a different save/session - the mod's tf_id registry
+  # is persisted per save game, so it starts empty on a new one.
+  base_z   = 5793.27
   build_z  = local.base_z + 100
-  center_x = -81932.75
-  center_y = 223819.48
+  center_x = -223975.55
+  center_y = -31243.68
 }
 
 # 64m x 64m floor (8x8 tiles of an 8x8m foundation) centered on the player -
