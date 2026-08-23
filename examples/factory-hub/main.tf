@@ -46,22 +46,22 @@ locals {
   # example moves to a different save/session - the mod's tf_id registry
   # is persisted per save game, so it starts empty on a new one.
   base_z   = 5793.27
-  # +200, not +100 - calibrated live by placing a row of constructors at
-  # several heights on a foundation and eyeballing which one sat flush
-  # (see mod/README.md's "Placement offset" note). Machines appear to be
-  # pivoted 2m above their own base, so they need base_z + half the
-  # foundation's 4m thickness to land on the surface instead of embedded
-  # in it.
-  build_z  = local.base_z + 200
-  # Conveyor attachments (merger/splitter) are a different mesh/pivot than
-  # manufacturers - +200 left them still visibly embedded. Recalibrated
-  # separately the same way: +300.
-  attachment_z = local.base_z + 300
+  # A foundation's pivot is at its center, so anything placed on top needs
+  # base_z + half the tile's thickness (calibrated live on the 4m-thick
+  # Build_Foundation_8x4_01_C: machines flush at +200 - see
+  # mod/README.md's "Placement offset" note). This example now uses the
+  # 1m-thick Build_Foundation_8x1_01_C, so half-thickness is 50.
+  foundation_half_thickness = 50
+  build_z  = local.base_z + local.foundation_half_thickness
+  # Conveyor attachments (merger/splitter) sit 100 higher than machines -
+  # their pivot is 1m below their base (calibrated separately: +300 on the
+  # 4m tile where machines were +200).
+  attachment_z = local.build_z + 100
   center_x = -223975.55
   center_y = -31243.68
 }
 
-# 64m x 64m floor (8x8 tiles of an 8x8m foundation) centered on the player -
+# 64m x 64m floor (8x8 tiles of an 8m x 1m-thick foundation) centered on the player -
 # plenty of room left over for more machines beyond the 6 wired up here.
 module "floor" {
   source  = "../../modules/grid-2d"
@@ -72,7 +72,7 @@ module "floor" {
 
 resource "satisfactory_foundation" "floor" {
   for_each = module.floor.positions
-  class    = "Build_Foundation_8x4_01_C"
+  class    = "Build_Foundation_8x1_01_C"
   x        = each.value.x
   y        = each.value.y
   z        = local.base_z
