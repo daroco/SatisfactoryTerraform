@@ -88,6 +88,14 @@ public:
 
 	void Register(const FString& TFID, AFGBuildable* Buildable);
 	void RegisterLightweight(const FString& TFID, const FLightweightBuildableInstanceRef& Ref);
+
+	/** Register a lightweight-tracked buildable from identity alone (class +
+	  * transform), resolving the engine ref by scanning the lightweight
+	  * subsystem for the live instance of that class within 1cm - used after
+	  * the game itself converts a freshly spawned buildable inside BeginPlay
+	  * (see SpawnBuildable). Returns false if no such instance exists. */
+	bool RegisterLightweightByIdentity(const FString& TFID, TSubclassOf<AFGBuildable> BuildableClass, const FTransform& Transform);
+
 	void Unregister(const FString& TFID);
 
 	/** Returns nullptr if the id is unknown, tracked as a lightweight instead, or the actor no longer exists. */

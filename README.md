@@ -45,16 +45,24 @@ shortly after placement (`AFGBuildable::ManagedByLightweightBuildableSubsystem()
 Manufacturers are never eligible, which is why this only ever affected
 `satisfactory_foundation`, not `satisfactory_building`.
 
-`SpawnBuildable` detects eligible classes and converts them deterministically
-right after spawning — `AFGLightweightBuildableSubsystem::AddFromBuildable()`
-returns a runtime index, wrapped in an `FLightweightBuildableInstanceRef`
-(a real UE `USTRUCT`, explicitly documented as safe to store indefinitely) —
-instead of letting the game's own async, build-effect-triggered conversion
-run on its own timing and orphaning the registry's actor pointer. The
-registry tracks both representations per `tf_id`; the API layer (GET/DELETE)
-checks both. See `STFRegistrySubsystem.h` and the `SpawnBuildable` comments
-in `STFApiServerSubsystem.cpp` for the full reasoning — every API name here
-was confirmed against the real FactoryGame source, not guessed.
+The conversion is NOT async: `AFGBuildable::BeginPlay` early-outs into
+`HandleLightweightAddition()` when `ShouldConvertToLightweight()`, adding the
+lightweight instance and destroying the actor synchronously — i.e. it has
+already happened by the time `FinishSpawning` returns inside
+`SpawnBuildable`. The mod must therefore never convert eligible buildables
+itself: an earlier version called `AddFromBuildable()` after spawning
+("deterministic conversion"), which silently **doubled** every foundation —
+two pixel-perfectly overlapping instances, ours tracked, the game's
+orphaned. That was the root cause of the entire "phantom tile" family of
+bugs (API deletes removed our copy while the orphan stayed standing;
+manual dismantling showed two instances per tile). `SpawnBuildable` now
+detects that the game converted (the actor is pending destruction after
+`FinishSpawning`) and registers the game's own instance, re-found by
+class + location (`RegisterLightweightByIdentity`). The registry tracks
+both representations per `tf_id`; the API layer (GET/DELETE) checks both.
+See `STFRegistrySubsystem.h` and the `SpawnBuildable` comments in
+`STFApiServerSubsystem.cpp` — grounded in the real
+`FGBuildable.cpp` source, not guessed.
 
 **Session-boundary self-heal.** The registry must not persist
 `FLightweightBuildableInstanceRef` itself: none of that struct's members

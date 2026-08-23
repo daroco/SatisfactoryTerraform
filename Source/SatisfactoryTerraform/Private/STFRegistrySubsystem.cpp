@@ -24,6 +24,21 @@ void ASTFRegistrySubsystem::RegisterLightweight(const FString& TFID, const FLigh
 	LightweightBuildables.Add(TFID, MoveTemp(Record));
 }
 
+bool ASTFRegistrySubsystem::RegisterLightweightByIdentity(const FString& TFID, TSubclassOf<AFGBuildable> BuildableClass, const FTransform& Transform)
+{
+	FSTFLightweightRecord Record;
+	Record.BuildableClass = BuildableClass;
+	Record.Transform = Transform;
+	// Same resolve used across session boundaries: find the live instance
+	// of this class within 1cm and point RuntimeRef at it.
+	if (!RevalidateLightweightRecord(Record))
+	{
+		return false;
+	}
+	LightweightBuildables.Add(TFID, MoveTemp(Record));
+	return true;
+}
+
 void ASTFRegistrySubsystem::Unregister(const FString& TFID)
 {
 	Buildables.Remove(TFID);

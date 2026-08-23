@@ -775,35 +775,39 @@ TSharedPtr<FJsonObject> ASTFApiServerSubsystem::SpawnBuildable(const TSharedPtr<
 	}
 
 	// Simple structural buildables (foundations, walls, ramps, ...) are
-	// eligible for Satisfactory's Lightweight Buildable system, which
-	// destroys the actor and migrates it to a memory-efficient non-actor
-	// representation shortly after spawning (matching vanilla performance
-	// at scale - manufacturers are never eligible, so this never applies to
-	// them). Rather than race that async, build-effect-triggered
-	// conversion, convert deterministically ourselves right now and keep
-	// the resulting FLightweightBuildableInstanceRef instead of the
-	// (about to be invalid) actor pointer. This mirrors the real
-	// AFGBuildable::HandleLightweightAddition() - which is protected, so
-	// not callable directly - using only its public building blocks
-	// (confirmed against the real implementation).
-	if (Buildable->ManagedByLightweightBuildableSubsystem())
+	// converted to Satisfactory's memory-efficient lightweight
+	// representation by the game ITSELF, synchronously, inside BeginPlay -
+	// i.e. during the FinishSpawning call above: AFGBuildable::BeginPlay
+	// early-outs into HandleLightweightAddition() when
+	// ShouldConvertToLightweight(), adding the instance and destroying the
+	// actor (confirmed in the real source). An earlier version of this code
+	// did its own AddFromBuildable() here on top of that, which silently
+	// DOUBLED every such buildable - two pixel-perfectly overlapping
+	// instances, ours tracked and the game's orphaned - the root cause of
+	// the whole "phantom tile" bug family (deleting via the API removed our
+	// copy while the orphan stayed standing). So: never convert here. If
+	// the game converted (the actor is pending destruction), register the
+	// game's own instance, re-found by class + location.
+	if (Buildable->IsActorBeingDestroyed() || Buildable->ManagedByLightweightBuildableSubsystem())
 	{
-		AFGLightweightBuildableSubsystem* LightweightSubsystem = AFGLightweightBuildableSubsystem::Get(GetWorld());
-		const int32 RuntimeIndex = LightweightSubsystem->AddFromBuildable(Buildable);
-		if (RuntimeIndex != INDEX_NONE)
+		if (Registry->RegisterLightweightByIdentity(TFID, Class, Transform))
 		{
-			FLightweightBuildableInstanceRef Ref;
-			Ref.Initialize(LightweightSubsystem, Class, RuntimeIndex);
-			Buildable->SetIsStaleLightweightTemporary(); // destruction below isn't a real dismantle
-			Buildable->Destroy();
-
-			Registry->RegisterLightweight(TFID, Ref);
 			UE_LOG(LogSatisfactoryTerraform, Log, TEXT("Spawned %s as %s (lightweight)"), *Class->GetName(), *TFID);
 			OutStatus = 201;
-			return LightweightToJson(TFID, Ref);
+			return LightweightToJson(TFID, *Registry->FindLightweight(TFID));
 		}
-		// AddFromBuildable failed (index INDEX_NONE) - fall through and keep
-		// the buildable as a regular full-actor registration below.
+		if (Buildable->IsActorBeingDestroyed())
+		{
+			// Converted but we couldn't find the instance - should not
+			// happen (the add is synchronous); fail loudly rather than
+			// registering a dead actor pointer.
+			OutStatus = 500;
+			OutError = TEXT("buildable was converted to a lightweight instance but the instance could not be resolved");
+			return nullptr;
+		}
+		// Eligible class but the game didn't convert (e.g. no instance
+		// data) and the actor is still alive - fall through and keep it as
+		// a regular full-actor registration below.
 	}
 
 	Registry->Register(TFID, Buildable);
