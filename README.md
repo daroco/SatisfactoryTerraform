@@ -94,8 +94,18 @@ genuinely dismantled → 404 → Terraform plans a recreate.
   `UFGBuildableSpawnStrategy_Spline::RouteSpline`, driven manually through
   the `PreSpawnBuildable`/`BeginSpawnBuildable`/`FinishSpawning`/
   `PostSpawnBuildable` lifecycle (the same pattern the game's own
-  blueprint-driven placement uses), then hooked up at both ends with
-  `UFGFactoryConnectionComponent::SetConnection`.
+  blueprint-driven placement uses), then wired **into** the chain with
+  `UFGFactoryConnectionComponent::SetConnection`: source output ->
+  `GetConnection0()` (belt input), `GetConnection1()` (belt output) ->
+  destination input. Wiring the two machine connectors straight to each
+  other instead — which an earlier version did, leaving the belt's own
+  connectors dangling — still moves items, but produces a world state
+  vanilla can't: a machine connector attached to another machine
+  connector. `AFGBuildableConveyorAttachment::Dismantle_Implementation`
+  assumes anything on its connectors is a conveyor and feeds the failed
+  cast into `Execute_CanDismantle`, whose `check(O != NULL)` then takes
+  the whole game down (issue #2) — including from the player's own build
+  gun, which no mod-side dismantle guard can protect.
 - **Power lines** (`Build_PowerLine_C`) connect directly via
   `AFGBuildableWire::Connect` between two `UFGPowerConnectionComponent`s.
 

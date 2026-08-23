@@ -6,6 +6,7 @@
 #include "Buildables/FGBuildable.h"
 #include "Buildables/FGBuildableFactory.h"
 #include "Buildables/FGBuildableManufacturer.h"
+#include "Buildables/FGBuildableConveyorBase.h" // GetConnection0/1 (belt in/out)
 #include "Buildables/FGBuildableConveyorBelt.h"
 #include "Buildables/FGBuildableConveyorAttachment.h"
 #include "Buildables/FGBuildableWire.h"
@@ -908,17 +909,41 @@ TSharedPtr<FJsonObject> ASTFApiServerSubsystem::SpawnConnection(const TSharedPtr
 		Belt->FinishSpawning(FromTransform);
 		Strategy->PostSpawnBuildable(Belt);
 
-		// SetConnection's real (compiled-game) implementation isn't visible
-		// from this source-available stub and returns void, so there's no
-		// direct success/failure signal - call from both ends so the
-		// connection is correct regardless of whether it's one- or
-		// two-sided internally, then verify via GetConnection() (a plain
-		// inline accessor, not a stub) that both ends actually ended up
-		// pointing at each other before declaring success.
-		FromConn->SetConnection(ToConn);
-		ToConn->SetConnection(FromConn);
+		// Wire the belt INTO the chain: source output -> belt input, belt
+		// output -> destination input. An earlier version connected
+		// FromConn straight to ToConn and left the belt's own connectors
+		// dangling - items still moved (the direct link is honoured) but
+		// the belt was decorative, and the world was in a state vanilla can
+		// never produce: a machine connector wired to another machine
+		// connector. That crashes the game on dismantle of a conveyor
+		// attachment, whose Dismantle_Implementation assumes anything on
+		// its connectors is a conveyor and passes the failed cast straight
+		// into Execute_CanDismantle (check(O != NULL) - see repo issue #2).
+		//
+		// mConnection0 is the input and mConnection1 the output, always in
+		// that order (FGBuildableConveyorBase.h), and the spline runs from
+		// FromConn to ToConn, so the mapping is unambiguous. SetConnection
+		// returns void, so success is verified via GetConnection() (a plain
+		// inline accessor, not a stub); calling from both ends keeps it
+		// correct whether or not the real implementation is two-sided.
+		AFGBuildableConveyorBase* ConveyorBase = Cast<AFGBuildableConveyorBase>(Belt);
+		UFGFactoryConnectionComponent* BeltIn = ConveyorBase ? ConveyorBase->GetConnection0() : nullptr;
+		UFGFactoryConnectionComponent* BeltOut = ConveyorBase ? ConveyorBase->GetConnection1() : nullptr;
+		if (!BeltIn || !BeltOut)
+		{
+			Belt->Destroy();
+			OutStatus = 422;
+			OutError = TEXT("that belt class has no usable input/output connectors");
+			return nullptr;
+		}
 
-		if (FromConn->GetConnection() != ToConn || ToConn->GetConnection() != FromConn)
+		FromConn->SetConnection(BeltIn);
+		BeltIn->SetConnection(FromConn);
+		BeltOut->SetConnection(ToConn);
+		ToConn->SetConnection(BeltOut);
+
+		if (FromConn->GetConnection() != BeltIn || BeltIn->GetConnection() != FromConn ||
+			BeltOut->GetConnection() != ToConn || ToConn->GetConnection() != BeltOut)
 		{
 			Belt->Destroy();
 			OutStatus = 422;
