@@ -153,5 +153,7 @@ some genuinely unhinged things fall out almost for free once M2/M3 land
 - ✅ M2 — recipe/clock patch, robust class resolution, proper dismantle,
   lightweight-instance tracking for structural buildables — verified live
   via `terraform apply` against a running game
-- 🚧 M3 — belts + power lines in the mod (provider side already done)
+- ✅ M3 — belts + power lines: `terraform apply` on `examples/iron-plate-line`
+  creates all 8 resources (foundations, buildings, belt, power line) with
+  zero drift on the next `plan` — verified live
 - ⏳ M4+ — import/drift polish, dedicated-server docs, registry release

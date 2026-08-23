@@ -4,16 +4,18 @@ The in-game half of the project: an SML mod that hosts the HTTP API described
 in [`../api/openapi.yaml`](../api/openapi.yaml). The Terraform provider is its
 only intended client.
 
-## Status (M2 done, M3 in progress)
+## Status (M0-M3 done)
 
-M1 and M2 are functionally verified live: `terraform apply` against a
-running game session, including dismantle-and-recreate of tainted resources
-and fresh foundation placement, all working end-to-end.
+Functionally verified live end-to-end: `terraform apply` on
+`examples/iron-plate-line` creates all 8 resources (4 foundations, 2
+buildings, a belt, a power line) against a running game session, and the
+next `plan` shows zero drift.
 
 - [x] Plugin/module scaffolding, SML root game-world module
 - [x] HTTP listener (UE `HTTPServer` module), bearer-token auth, JSON helpers
-- [x] Registry subsystem persisting `tf_id -> actor`/lightweight-ref in the
-      save game (see "Lightweight buildables" below)
+- [x] Registry subsystem persisting `tf_id -> actor`/lightweight-ref/
+      connection-endpoints in the save game (see "Lightweight buildables"
+      and "Connections" below)
 - [x] `GET /health`, `GET /world`, buildable spawn/read/list/delete
 - [x] Path-parameter routing (`/api/v1/buildables/:tf_id`) — `IHttpRouter`
       does NOT prefix-match a bare trailing-slash route; GET/PATCH/DELETE-by-id
@@ -28,7 +30,7 @@ and fresh foundation placement, all working end-to-end.
       buildable and recipe lookups
 - [x] Proper dismantle (M2) — routes through `IFGDismantleInterface` when a
       buildable implements it, falls back to `Destroy()` otherwise
-- [ ] Belts & power lines (M3) — see TODO(M3) in `SpawnConnection`
+- [x] Belts & power lines (M3) — see "Connections" below
 
 ### Lightweight buildables
 
@@ -50,7 +52,54 @@ checks both. See `STFRegistrySubsystem.h` and the `SpawnBuildable` comments
 in `STFApiServerSubsystem.cpp` for the full reasoning — every API name here
 was confirmed against the real FactoryGame source, not guessed.
 
-Reference implementations to crib from while filling in the TODOs:
+**Session-boundary self-heal.** `FLightweightBuildableInstanceRef` caches a
+weak pointer (`OwnerSubsystem`) to the `AFGLightweightBuildableSubsystem`
+that existed when it was created, but that subsystem actor is recreated
+fresh every session — a ref deserialized from a save has a stale
+`OwnerSubsystem` even though the underlying lightweight data (which the game
+itself saves) is fine. `ASTFRegistrySubsystem::RevalidateLightweightRef`
+re-points a stale ref at the current session's subsystem using its own
+recoverable class (`GetBuildableClass()`, public) and id
+(`LightweightBuildableID`, a protected `UPROPERTY` reached via reflection,
+the same pattern used elsewhere in this file) and re-`Initialize()`s it.
+`FindLightweight` and `GetAll` call this before trusting a stored ref.
+Grounded in the real API (every member/method name confirmed against the
+FactoryGame source) but hasn't had its own dedicated quit/relaunch re-test
+yet — worth doing before M4.
+
+### Connections (belts & power lines, M3)
+
+`SpawnConnection` handles both connection classes in `POST
+/api/v1/connections`:
+
+- **Belts** (any `Build_ConveyorBelt*_C`) spawn via
+  `UFGBuildableSpawnStrategy_Spline::RouteSpline`, driven manually through
+  the `PreSpawnBuildable`/`BeginSpawnBuildable`/`FinishSpawning`/
+  `PostSpawnBuildable` lifecycle (the same pattern the game's own
+  blueprint-driven placement uses), then hooked up at both ends with
+  `UFGFactoryConnectionComponent::SetConnection`.
+- **Power lines** (`Build_PowerLine_C`) connect directly via
+  `AFGBuildableWire::Connect` between two `UFGPowerConnectionComponent`s.
+
+Both ends are resolved from the registry by `from_id`/`to_id` (which may be
+a full actor or a lightweight ref — buildings are never lightweight, but
+this keeps the connector-lookup path uniform) and connector index
+(`GetFactoryConnector`/`GetPowerConnector`, sorted for factory connectors to
+match the provider's documented indexing). The spawned connection gets its
+own `tf_id` and is registered like any other buildable, plus a
+`FSTFConnectionEndpoints` entry (see `STFRegistrySubsystem.h`) recording
+which two buildables/connectors it joins, since that's not recoverable from
+the connection actor alone. `HandleConnections`/`HandleConnectionByID` use
+`GetAll()` + `FindConnectionEndpoints()` to distinguish connections from
+plain buildables sharing the same registry and produce the
+`{tf_id, class, from, to}` shape from `api/openapi.yaml`.
+
+Verified live: `terraform apply` on `examples/iron-plate-line` creates a
+belt between a smelter and constructor and a power line between the same
+two buildings, alongside 4 foundations, with a clean zero-diff `plan`
+afterward.
+
+Reference implementations this was cribbed from:
 [FactorySpawner](https://github.com/uniqueSimon/FactorySpawner) (spawning,
 belt/wire hookup) and
 [FicsitRemoteMonitoring](https://github.com/porisius/FicsitRemoteMonitoring)

@@ -83,5 +83,12 @@ M2 (done): PATCH recipe/clock, asset-registry class resolution, proper
   dismantle, and lightweight-instance tracking for structural buildables
   (foundations/walls/etc. - see mod/README.md) - functionally verified
   end-to-end against a live game session via `terraform apply`.
-M3 (in progress): belts + power lines in the mod (provider side already done).
+M3 (done): belts + power lines in the mod. `terraform apply` on
+  examples/iron-plate-line creates all 8 resources (4 foundations, 2
+  buildings, belt, power line) with zero drift on the next `plan` -
+  verified live. The lightweight-ref self-heal fix (see mod/README.md)
+  is grounded in the real API but hasn't had its own dedicated
+  quit/relaunch re-test yet.
+M4+ next: import/drift polish, dedicated-server docs, registry release,
+  GitOps mode (see docs/gitops-factory.md).
 M4+: import/drift polish, dedicated-server docs, registry release, GitOps mode.

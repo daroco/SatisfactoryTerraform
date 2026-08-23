@@ -83,10 +83,13 @@ func (r *buildingResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 				Description: "Recipe class name, e.g. Recipe_IronPlate_C. Changeable in place.",
 			},
 			"clock_speed": schema.Float64Attribute{
-				Optional:    true,
-				Computed:    true,
-				Default:     float64default.StaticFloat64(1.0),
-				Description: "Clock speed as a fraction (1.0 = 100%). Changeable in place.",
+				Optional: true,
+				Computed: true,
+				Description: "Clock speed as a fraction (1.0 = 100%). Changeable in place. " +
+					"Only meaningful for manufacturer buildings (constructors, smelters, ...); " +
+					"the mod omits this field entirely for other classes (splitters, power poles, " +
+					"...), so it can't have a static default without breaking those - defaults to " +
+					"1.0 on create for classes that do support it (see Create).",
 			},
 		},
 	}
@@ -131,6 +134,14 @@ func (r *buildingResource) Create(ctx context.Context, req resource.CreateReques
 		return
 	}
 	plan.ID = types.StringValue(uuid.NewString())
+	if plan.ClockSpeed.IsUnknown() || plan.ClockSpeed.IsNull() {
+		// No schema-level Default (see Schema) since the mod omits
+		// clock_speed entirely for non-manufacturer classes - applying
+		// that default here instead of asserting it at plan time avoids
+		// a "provider produced inconsistent result" error when the
+		// created buildable turns out not to support it.
+		plan.ClockSpeed = types.Float64Value(1.0)
+	}
 	created, err := r.client.CreateBuildable(ctx, plan.toAPI())
 	if err != nil {
 		resp.Diagnostics.AddError("Failed to spawn building", err.Error())
