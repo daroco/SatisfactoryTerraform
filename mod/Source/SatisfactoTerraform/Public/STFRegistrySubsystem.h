@@ -66,11 +66,13 @@ public:
 	/** Returns nullptr if the id is unknown, tracked as a lightweight instead, or the actor no longer exists. */
 	AFGBuildable* Find(const FString& TFID) const;
 
-	/** Returns nullptr if the id is unknown, tracked as a full actor instead, or the instance is no longer valid. */
-	const FLightweightBuildableInstanceRef* FindLightweight(const FString& TFID) const;
+	/** Returns nullptr if the id is unknown, tracked as a full actor instead, or the instance is no longer valid
+	  * (after attempting to self-heal a stale owner-subsystem pointer left over from a previous session - see
+	  * RevalidateLightweightRef). Non-const because that self-heal writes back into the stored ref. */
+	const FLightweightBuildableInstanceRef* FindLightweight(const FString& TFID);
 
 	/** True if TFID resolves to a live entry in either representation - use for the POST duplicate-id (409) check. */
-	bool Contains(const FString& TFID) const { return Find(TFID) != nullptr || FindLightweight(TFID) != nullptr; }
+	bool Contains(const FString& TFID) { return Find(TFID) != nullptr || FindLightweight(TFID) != nullptr; }
 
 	/** One resolved entry from GetAll(): exactly one of Buildable/LightweightRef is meaningful, per IsLightweight(). */
 	struct FEntry
@@ -81,8 +83,8 @@ public:
 		bool IsLightweight() const { return Buildable == nullptr; }
 	};
 
-	/** All live tf_id entries across both representations (dead ones pruned). */
-	TArray<FEntry> GetAll() const;
+	/** All live tf_id entries across both representations (dead ones pruned). Non-const - see FindLightweight. */
+	TArray<FEntry> GetAll();
 
 	/** Connections (belts/power lines) share the same tf_id namespace and
 	  * actor/lightweight tracking as buildables (see Register/RegisterLightweight/
@@ -95,6 +97,21 @@ public:
 	virtual bool ShouldSave_Implementation() const override { return true; }
 
 private:
+	/** FLightweightBuildableInstanceRef caches a weak pointer to the
+	  * AFGLightweightBuildableSubsystem that existed when it was created -
+	  * that subsystem actor is recreated fresh every session, so a ref
+	  * deserialized from a save has a stale OwnerSubsystem even though the
+	  * underlying lightweight data (which the game itself saves - see the
+	  * class comment on AFGLightweightBuildableSubsystem) is fine. Confirmed
+	  * live: a lightweight-tracked foundation survived a GET within the same
+	  * session but 404'd after a full quit/relaunch. Re-points Ref at the
+	  * current session's subsystem using its own recoverable class + id
+	  * (LightweightBuildableID - a real UPROPERTY, reachable via reflection
+	  * despite being protected) if that's the only problem. Returns Ref's own
+	  * IsValid() after the attempt - false means the underlying instance is
+	  * genuinely gone (e.g. dismantled in-game), not just our stale pointer. */
+	bool RevalidateLightweightRef(FLightweightBuildableInstanceRef& Ref) const;
+
 	UPROPERTY(SaveGame)
 	TMap<FString, AFGBuildable*> Buildables;
 

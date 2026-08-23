@@ -2,6 +2,7 @@
 
 #include "Buildables/FGBuildable.h"
 #include "Subsystem/SubsystemActorManager.h"
+#include "UObject/UnrealType.h"
 
 ASTFRegistrySubsystem* ASTFRegistrySubsystem::Get(UWorld* World)
 {
@@ -37,17 +38,38 @@ AFGBuildable* ASTFRegistrySubsystem::Find(const FString& TFID) const
 	return *Found;
 }
 
-const FLightweightBuildableInstanceRef* ASTFRegistrySubsystem::FindLightweight(const FString& TFID) const
+bool ASTFRegistrySubsystem::RevalidateLightweightRef(FLightweightBuildableInstanceRef& Ref) const
 {
-	const FLightweightBuildableInstanceRef* Found = LightweightBuildables.Find(TFID);
-	if (!Found || !Found->IsValid())
+	if (Ref.IsValid())
+	{
+		return true;
+	}
+	AFGLightweightBuildableSubsystem* LightweightSubsystem = AFGLightweightBuildableSubsystem::Get(GetWorld());
+	if (!LightweightSubsystem)
+	{
+		return false;
+	}
+	static FIntProperty* IDProp = FindFProperty<FIntProperty>(FLightweightBuildableInstanceRef::StaticStruct(), TEXT("LightweightBuildableID"));
+	if (!IDProp)
+	{
+		return false;
+	}
+	const int32 ID = IDProp->GetPropertyValue_InContainer(&Ref);
+	Ref.Initialize(LightweightSubsystem, Ref.GetBuildableClass(), ID);
+	return Ref.IsValid();
+}
+
+const FLightweightBuildableInstanceRef* ASTFRegistrySubsystem::FindLightweight(const FString& TFID)
+{
+	FLightweightBuildableInstanceRef* Found = LightweightBuildables.Find(TFID);
+	if (!Found || !RevalidateLightweightRef(*Found))
 	{
 		return nullptr;
 	}
 	return Found;
 }
 
-TArray<ASTFRegistrySubsystem::FEntry> ASTFRegistrySubsystem::GetAll() const
+TArray<ASTFRegistrySubsystem::FEntry> ASTFRegistrySubsystem::GetAll()
 {
 	TArray<FEntry> Out;
 	for (const auto& Pair : Buildables)
@@ -60,9 +82,9 @@ TArray<ASTFRegistrySubsystem::FEntry> ASTFRegistrySubsystem::GetAll() const
 			Out.Add(MoveTemp(Entry));
 		}
 	}
-	for (const auto& Pair : LightweightBuildables)
+	for (auto& Pair : LightweightBuildables)
 	{
-		if (Pair.Value.IsValid())
+		if (RevalidateLightweightRef(Pair.Value))
 		{
 			FEntry Entry;
 			Entry.TFID = Pair.Key;
