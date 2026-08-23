@@ -109,9 +109,11 @@ locals {
     # yaw turns the machine so its output connector faces the hub (adjusted
     # by eye against the live build - every map entry needs the key, since
     # Terraform requires map-of-object entries to share one shape).
-    west  = { x = local.center_x - 2400, y = local.center_y, merger_connector = 0, yaw = 90 }     # merger back input
-    south = { x = local.center_x - 400, y = local.center_y + 2400, merger_connector = 2, yaw = 0 } # merger +y input
-    north = { x = local.center_x - 400, y = local.center_y - 2400, merger_connector = 3, yaw = 0 } # merger -y input
+    # A smelter's output connector at yaw 0 faces +y (confirmed by eye
+    # against the live build), so each yaw here turns +y toward the hub.
+    west  = { x = local.center_x - 2400, y = local.center_y, merger_connector = 0, yaw = -90 }      # output +x, merger back input
+    south = { x = local.center_x - 400, y = local.center_y + 2400, merger_connector = 2, yaw = 180 } # output -y, merger +y input
+    north = { x = local.center_x - 400, y = local.center_y - 2400, merger_connector = 3, yaw = 0 }   # output +y, merger -y input
   }
 }
 
@@ -138,10 +140,12 @@ resource "satisfactory_belt" "inbound" {
 
 locals {
   consumers = {
-    # yaw: see the note on local.producers.
-    east  = { x = local.center_x + 2400, y = local.center_y, splitter_connector = 0, yaw = 90 }    # splitter front output
-    south = { x = local.center_x + 400, y = local.center_y + 2400, splitter_connector = 2, yaw = 0 } # splitter +y output
-    north = { x = local.center_x + 400, y = local.center_y - 2400, splitter_connector = 3, yaw = 0 } # splitter -y output
+    # A constructor's input connector at yaw 0 faces +y (same convention as
+    # the smelter's output - see local.producers), so each yaw turns +y
+    # toward the incoming belt from the splitter.
+    east  = { x = local.center_x + 2400, y = local.center_y, splitter_connector = 0, yaw = 90 }      # input -x, splitter front output
+    south = { x = local.center_x + 400, y = local.center_y + 2400, splitter_connector = 2, yaw = 180 } # input -y, splitter +y output
+    north = { x = local.center_x + 400, y = local.center_y - 2400, splitter_connector = 3, yaw = 0 }   # input +y, splitter -y output
   }
 }
 
