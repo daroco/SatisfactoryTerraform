@@ -2,7 +2,6 @@
 
 #include "Buildables/FGBuildable.h"
 #include "Subsystem/SubsystemActorManager.h"
-#include "UObject/UnrealType.h"
 
 ASTFRegistrySubsystem* ASTFRegistrySubsystem::Get(UWorld* World)
 {
@@ -64,19 +63,48 @@ bool ASTFRegistrySubsystem::RevalidateLightweightRef(FLightweightBuildableInstan
 	{
 		return true;
 	}
+
+	// A ref deserialized from the save has a dead OwnerSubsystem weak
+	// pointer, and its saved LightweightBuildableID is NOT trustworthy
+	// either: that id is just an index into the subsystem's per-class
+	// instance array, which the game rebuilds on load, so indices can
+	// shift (confirmed live, issue #2: foundations vanished from the API
+	// after a relaunch while still standing in the world - and an
+	// id-based re-Initialize could silently bind a *different* tile).
+	// The identity that survives the round trip is what the ref itself
+	// saved: buildable class + transform. Re-find the instance by those.
+	// GetAllLightweightBuildableInstances is a header-inline accessor, so
+	// unlike most of this class it works without the stub-source caveat.
 	AFGLightweightBuildableSubsystem* LightweightSubsystem = AFGLightweightBuildableSubsystem::Get(GetWorld());
-	if (!LightweightSubsystem)
+	const TSubclassOf<AFGBuildable> BuildableClass = Ref.GetBuildableClass();
+	if (!LightweightSubsystem || !BuildableClass)
 	{
 		return false;
 	}
-	static FIntProperty* IDProp = FindFProperty<FIntProperty>(FLightweightBuildableInstanceRef::StaticStruct(), TEXT("LightweightBuildableID"));
-	if (!IDProp)
+	const TArray<FRuntimeBuildableInstanceData>* Instances =
+		LightweightSubsystem->GetAllLightweightBuildableInstances().Find(BuildableClass);
+	if (!Instances)
 	{
 		return false;
 	}
-	const int32 ID = IDProp->GetPropertyValue_InContainer(&Ref);
-	Ref.Initialize(LightweightSubsystem, Ref.GetBuildableClass(), ID);
-	return Ref.IsValid();
+
+	const FVector SavedLocation = Ref.GetBuildableTransform().GetLocation();
+	for (int32 Index = 0; Index < Instances->Num(); ++Index)
+	{
+		const FRuntimeBuildableInstanceData& Data = (*Instances)[Index];
+		// Removed instances keep their array slot as a hole; IsValidOnLoad
+		// (header-inline) filters those. Two same-class instances can't
+		// coexist within 1cm, so first location match is THE instance.
+		if (!Data.IsValidOnLoad() || !Data.Transform.GetLocation().Equals(SavedLocation, 1.0f))
+		{
+			continue;
+		}
+		Ref.Initialize(LightweightSubsystem, BuildableClass, Index);
+		return Ref.IsValid();
+	}
+	// No match: the instance is genuinely gone (dismantled in-game while we
+	// weren't looking) - surface as 404 so Terraform plans a recreate.
+	return false;
 }
 
 const FLightweightBuildableInstanceRef* ASTFRegistrySubsystem::FindLightweight(const FString& TFID)

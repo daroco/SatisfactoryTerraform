@@ -41,10 +41,19 @@ public:
 	FString Token;
 
 private:
-	TSharedPtr<IHttpRouter> Router;
-	TArray<FHttpRouteHandle> Routes;
+	/** Routes are bound to the process-lifetime router exactly once (see
+	  * BindRoutesOnce) and dispatch through this: the subsystem instance for
+	  * the currently loaded session. Set in BeginPlay, cleared in EndPlay;
+	  * handlers 503 while it's unset (main menu, mid-load). Never unbinding
+	  * sidesteps a live-confirmed IHttpRouter quirk where re-registering a
+	  * ":param" route template after a same-process save switch leaves it
+	  * permanently unmatched (issue #3). */
+	static TWeakObjectPtr<ASTFApiServerSubsystem> ActiveInstance;
+	static bool bRoutesBound;
 
-	void BindRoutes();
+	TSharedPtr<IHttpRouter> Router;
+
+	void BindRoutesOnce();
 	bool CheckAuth(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete) const;
 
 	// Route handlers.

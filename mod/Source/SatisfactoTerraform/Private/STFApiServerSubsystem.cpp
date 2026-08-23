@@ -62,7 +62,7 @@ namespace
 	}
 
 	/** The :tf_id path parameter, parsed by IHttpRouter from a route
-	  * registered like "/api/v1/buildables/:tf_id" (see BindRoutes). */
+	  * registered like "/api/v1/buildables/:tf_id" (see BindRoutesOnce). */
 	FString PathID(const FHttpServerRequest& Request)
 	{
 		return Request.PathParams.FindRef(TEXT("tf_id"));
@@ -166,6 +166,9 @@ ASTFApiServerSubsystem::ASTFApiServerSubsystem()
 	ReplicationPolicy = ESubsystemReplicationPolicy::SpawnOnServer;
 }
 
+TWeakObjectPtr<ASTFApiServerSubsystem> ASTFApiServerSubsystem::ActiveInstance;
+bool ASTFApiServerSubsystem::bRoutesBound = false;
+
 void ASTFApiServerSubsystem::BeginPlay()
 {
 	Super::BeginPlay();
@@ -177,31 +180,53 @@ void ASTFApiServerSubsystem::BeginPlay()
 		UE_LOG(LogSatisfactoTerraform, Error, TEXT("Could not bind HTTP router on port %d"), Port);
 		return;
 	}
-	BindRoutes();
+	ActiveInstance = this;
+	BindRoutesOnce();
 	Module.StartAllListeners();
 	UE_LOG(LogSatisfactoTerraform, Log, TEXT("SatisfactoTerraform API listening on port %d"), Port);
 }
 
 void ASTFApiServerSubsystem::EndPlay(const EEndPlayReason::Type Reason)
 {
-	if (Router.IsValid())
+	// Deliberately NOT unbinding the routes: they're process-lifetime and
+	// dispatch through ActiveInstance (see the header comment on it for the
+	// IHttpRouter re-registration quirk this avoids). Just stop being the
+	// dispatch target; until the next session's BeginPlay the handlers 503.
+	if (ActiveInstance.Get() == this)
 	{
-		for (const FHttpRouteHandle& Handle : Routes)
-		{
-			Router->UnbindRoute(Handle);
-		}
-		Routes.Empty();
+		ActiveInstance = nullptr;
 	}
 	Super::EndPlay(Reason);
 }
 
-void ASTFApiServerSubsystem::BindRoutes()
+void ASTFApiServerSubsystem::BindRoutesOnce()
 {
-	const auto Bind = [this](const FString& Path, EHttpServerRequestVerbs Verbs, auto Handler)
+	if (bRoutesBound)
 	{
-		Routes.Add(Router->BindRoute(
+		return;
+	}
+	bRoutesBound = true;
+
+	// Static-lambda dispatch, not CreateUObject: these handlers outlive any
+	// one subsystem instance (they live as long as the process), so they
+	// must not be tied to a UObject that gets destroyed on session end -
+	// they look up whichever instance is current, per request.
+	const auto Bind = [this](const FString& Path, EHttpServerRequestVerbs Verbs,
+		bool (ASTFApiServerSubsystem::*Handler)(const FHttpServerRequest&, const FHttpResultCallback&))
+	{
+		Router->BindRoute(
 			FHttpPath(Path), Verbs,
-			FHttpRequestHandler::CreateUObject(this, Handler)));
+			FHttpRequestHandler::CreateLambda(
+				[Handler](const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete)
+				{
+					ASTFApiServerSubsystem* Instance = ActiveInstance.Get();
+					if (!Instance)
+					{
+						OnComplete(ErrorResponse(503, TEXT("no game session is loaded")));
+						return true;
+					}
+					return (Instance->*Handler)(Request, OnComplete);
+				}));
 	};
 
 	Bind(TEXT("/api/v1/health"), EHttpServerRequestVerbs::VERB_GET, &ASTFApiServerSubsystem::HandleHealth);

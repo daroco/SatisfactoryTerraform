@@ -57,15 +57,19 @@ weak pointer (`OwnerSubsystem`) to the `AFGLightweightBuildableSubsystem`
 that existed when it was created, but that subsystem actor is recreated
 fresh every session — a ref deserialized from a save has a stale
 `OwnerSubsystem` even though the underlying lightweight data (which the game
-itself saves) is fine. `ASTFRegistrySubsystem::RevalidateLightweightRef`
-re-points a stale ref at the current session's subsystem using its own
-recoverable class (`GetBuildableClass()`, public) and id
-(`LightweightBuildableID`, a protected `UPROPERTY` reached via reflection,
-the same pattern used elsewhere in this file) and re-`Initialize()`s it.
-`FindLightweight` and `GetAll` call this before trusting a stored ref.
-Grounded in the real API (every member/method name confirmed against the
-FactoryGame source) but hasn't had its own dedicated quit/relaunch re-test
-yet — worth doing before M4.
+itself saves) is fine. Worse (confirmed live, issue #2): the ref's saved
+`LightweightBuildableID` is just an index into the subsystem's per-class
+instance array, which the game rebuilds on load — so after a relaunch the
+saved id can point at nothing, or at a *different* instance. An earlier
+version of this fix re-`Initialize()`d with the saved id (read via
+reflection) and failed exactly that way. `ASTFRegistrySubsystem::
+RevalidateLightweightRef` now recovers by the identity that actually
+survives the round trip — the ref's own saved class + location — scanning
+`GetAllLightweightBuildableInstances()` (a public, header-inline accessor,
+so no stub-source caveat) for the live instance within 1cm and
+re-`Initialize()`ing with its current index. `FindLightweight` and `GetAll`
+call this before trusting a stored ref; no match means genuinely dismantled
+and surfaces as 404.
 
 ### Connections (belts & power lines, M3)
 
@@ -123,25 +127,22 @@ different foundation/machine classes would need their own calibration, and
 the API has no way to ask a class for its own footprint/pivot (see the
 `grid-2d` module's README for the same caveat on spacing).
 
-### Route rebinding across a save switch (open issue)
+### Route rebinding across a save switch (fixed)
 
-`BindRoutes`/`EndPlay` (see `ASTFApiServerSubsystem.h`/`.cpp`) bind the six
-routes in `BeginPlay` and unbind them in `EndPlay`, which should make a
-clean level transition rebind fine. Observed live, though: the *first* save
-loaded after launching the game routes fine, but switching to a *second*
-save without fully quitting the process leaves the two `:tf_id` templated
-routes (`/api/v1/buildables/:tf_id`, `/api/v1/connections/:tf_id`)
-returning `route_handler_not_found` for every request, while the
-non-templated routes (`/health`, `/world`, the bare `/buildables` and
-`/connections` list/create routes) keep working fine on the new save.
-`EndPlay`'s `UnbindRoute` calls look correct, so this looks like an
-`IHttpRouter` quirk specific to re-registering a path *template* rather
-than a mod bug in the unbind logic - not root-caused yet. Breaks
-`GetBuildable`/`PatchBuildable`/`DeleteBuildable` (so `terraform plan`
-shows every resource as needing recreation) until the whole game process is
-restarted. Workaround: fully quit and relaunch Satisfactory (not just
-load a different save) after switching saves before running Terraform
-against it again.
+Observed live: the *first* save loaded after launching the game routed
+fine, but switching to a *second* save without quitting the process left
+the two `:tf_id` templated routes (`/api/v1/buildables/:tf_id`,
+`/api/v1/connections/:tf_id`) returning `route_handler_not_found` for
+every request, while the non-templated routes kept working. The original
+code bound routes in `BeginPlay` and unbound them in `EndPlay` -
+correct-looking, but re-registering a path *template* on the same
+`IHttpRouter` after an unbind is where the engine quirk lives (issue #3;
+never root-caused inside the engine). The fix sidesteps it: routes are now
+bound exactly once per process (`BindRoutesOnce`) and never unbound;
+handlers dispatch through a static `ActiveInstance` weak pointer to
+whichever subsystem instance belongs to the currently loaded session, and
+return 503 when none does (main menu, mid-load). See
+`STFApiServerSubsystem.h`'s comment on `ActiveInstance`.
 
 ### Conveyor attachment dismantle crash (fixed)
 

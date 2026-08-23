@@ -101,15 +101,13 @@ private:
 	  * AFGLightweightBuildableSubsystem that existed when it was created -
 	  * that subsystem actor is recreated fresh every session, so a ref
 	  * deserialized from a save has a stale OwnerSubsystem even though the
-	  * underlying lightweight data (which the game itself saves - see the
-	  * class comment on AFGLightweightBuildableSubsystem) is fine. Confirmed
-	  * live: a lightweight-tracked foundation survived a GET within the same
-	  * session but 404'd after a full quit/relaunch. Re-points Ref at the
-	  * current session's subsystem using its own recoverable class + id
-	  * (LightweightBuildableID - a real UPROPERTY, reachable via reflection
-	  * despite being protected) if that's the only problem. Returns Ref's own
-	  * IsValid() after the attempt - false means the underlying instance is
-	  * genuinely gone (e.g. dismantled in-game), not just our stale pointer. */
+	  * underlying lightweight data (which the game itself saves) is fine.
+	  * Its saved integer id is equally untrustworthy after a reload (it's
+	  * an index the subsystem reshuffles on load - issue #2), so recovery
+	  * re-finds the instance by the ref's own saved class + location and
+	  * re-Initializes against the current session's subsystem. Returns
+	  * Ref's IsValid() after the attempt - false means the instance is
+	  * genuinely gone (e.g. dismantled in-game), and the API should 404. */
 	bool RevalidateLightweightRef(FLightweightBuildableInstanceRef& Ref) const;
 
 	UPROPERTY(SaveGame)
