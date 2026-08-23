@@ -53,6 +53,10 @@ locals {
   # foundation's 4m thickness to land on the surface instead of embedded
   # in it.
   build_z  = local.base_z + 200
+  # Conveyor attachments (merger/splitter) are a different mesh/pivot than
+  # manufacturers - +200 left them still visibly embedded. Recalibrated
+  # separately the same way: +300.
+  attachment_z = local.base_z + 300
   center_x = -223975.55
   center_y = -31243.68
 }
@@ -80,14 +84,14 @@ resource "satisfactory_building" "merger" {
   class = "Build_ConveyorAttachmentMerger_C"
   x     = local.center_x - 400
   y     = local.center_y
-  z     = local.build_z
+  z     = local.attachment_z
 }
 
 resource "satisfactory_building" "splitter" {
   class = "Build_ConveyorAttachmentSplitter_C"
   x     = local.center_x + 400
   y     = local.center_y
-  z     = local.build_z
+  z     = local.attachment_z
 }
 
 resource "satisfactory_belt" "hub_core" {
