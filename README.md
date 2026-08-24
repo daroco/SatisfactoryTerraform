@@ -79,11 +79,31 @@ recreated), and `LightweightBuildableID` is just an index into a per-class
 array the game rebuilds on load, so a saved id can point at nothing — or
 at a *different* tile. The registry therefore stores its own
 `FSTFLightweightRecord`: SaveGame-flagged class + transform (the identity
-that actually survives), plus a Transient engine ref re-resolved on first
-use each session by scanning `GetAllLightweightBuildableInstances()` (a
-public, header-inline accessor, so no stub-source caveat) for the live
-instance of that class within 1cm of the saved location. No match means
-genuinely dismantled → 404 → Terraform plans a recreate.
+that actually survives), plus a Transient engine ref re-resolved through
+`GetAllLightweightBuildableInstances()` (a public, header-inline accessor,
+so no stub-source caveat) by matching class + location within 1cm.
+
+Two rules that fixed real, world-corrupting bugs and must not be
+"optimized" away:
+
+**Never trust a cached ref.** `FLightweightBuildableInstanceRef::IsValid()`
+only checks that the instance's array slot resolves to a non-null pointer,
+and the subsystem never shrinks those arrays: removal calls
+`FRuntimeBuildableInstanceData::Clear()` and recycles the slot later. So a
+ref to a *dismantled* instance keeps reporting `IsValid()` forever - which
+made the API insist a hand-dismantled foundation still existed and silently
+broke drift detection, the whole point of the project. `Clear()` nulls
+`BuiltWithRecipe`, so `IsValidOnLoad()` is the honest liveness check and
+every resolve goes through it. The stored index is kept only as a hint that
+must re-verify before it is used.
+
+**Fail closed when ambiguous.** The scan binds only when *exactly one* live
+instance matches. Zero means genuinely dismantled; more than one means two
+buildables share a position and we cannot tell them apart. Both return
+false → 404 → Terraform plans a recreate, which is safe. Picking the first
+match instead is not: two records then resolve to the same instance, and
+deleting one destroys the other's buildable. That cost 27 real foundations
+once (issue #3).
 
 ### Connections (belts & power lines, M3)
 

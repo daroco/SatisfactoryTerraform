@@ -55,6 +55,12 @@ struct FSTFLightweightRecord
 	/** Never saved (Transient); see RevalidateLightweightRecord. */
 	UPROPERTY(Transient)
 	FLightweightBuildableInstanceRef RuntimeRef;
+
+	/** Index this record last resolved to, as a fast-path hint only - never
+	  * trusted without re-verifying the instance there is still ours (the
+	  * subsystem recycles slots). Session-local like RuntimeRef. */
+	UPROPERTY(Transient)
+	int32 RuntimeIndexHint = INDEX_NONE;
 };
 
 /**

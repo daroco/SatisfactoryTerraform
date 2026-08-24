@@ -3,6 +3,16 @@
 #include "Buildables/FGBuildable.h"
 #include "Subsystem/SubsystemActorManager.h"
 
+namespace
+{
+	/** How far a live instance may sit from a record's saved location and
+	  * still be considered the same buildable, in centimetres. Absorbs the
+	  * float32 quantization the save round-trip applies to transforms
+	  * (~0.02cm at map-scale coordinates) while staying far below the 800cm
+	  * spacing of even the smallest foundation grid. */
+	constexpr double LocationToleranceCm = 1.0;
+}
+
 ASTFRegistrySubsystem* ASTFRegistrySubsystem::Get(UWorld* World)
 {
 	USubsystemActorManager* Manager = World->GetSubsystem<USubsystemActorManager>();
@@ -78,20 +88,16 @@ AFGBuildable* ASTFRegistrySubsystem::Find(const FString& TFID) const
 
 bool ASTFRegistrySubsystem::RevalidateLightweightRecord(FSTFLightweightRecord& Record) const
 {
-	// The cached ref is session-local (Transient - persisting the engine
-	// ref round-trips as an empty struct, see the header). Valid means it
-	// was resolved earlier this session and the instance still exists.
-	if (Record.RuntimeRef.IsValid())
-	{
-		return true;
-	}
-
-	// Re-find the instance by the identity we saved ourselves: class +
-	// location. The instance's index in the subsystem's per-class array is
-	// NOT part of that identity - the game rebuilds those arrays on load,
-	// so indices shift between sessions (issue #2).
-	// GetAllLightweightBuildableInstances is a header-inline accessor, so
-	// unlike most of this class it works without the stub-source caveat.
+	// NOTE: there is deliberately no `if (RuntimeRef.IsValid()) return true;`
+	// fast path. FLightweightBuildableInstanceRef::IsValid() only checks that
+	// the instance's array slot resolves to a non-null pointer, and the
+	// subsystem does not shrink those arrays on removal - it calls
+	// FRuntimeBuildableInstanceData::Clear() and recycles the slot later
+	// (see mBuildableClassToEmptyIndices). So a ref to a dismantled instance
+	// keeps reporting IsValid(), which made the API insist a hand-dismantled
+	// foundation still existed and broke drift detection entirely. Clear()
+	// nulls BuiltWithRecipe, so IsValidOnLoad() is the honest liveness check
+	// and every resolve below goes through it.
 	AFGLightweightBuildableSubsystem* LightweightSubsystem = AFGLightweightBuildableSubsystem::Get(GetWorld());
 	if (!LightweightSubsystem || !Record.BuildableClass)
 	{
@@ -104,23 +110,51 @@ bool ASTFRegistrySubsystem::RevalidateLightweightRecord(FSTFLightweightRecord& R
 		return false;
 	}
 
+	// Identity is what we saved ourselves: class + location. The array index
+	// is NOT identity - it shifts across loads and gets recycled after
+	// removals - so it is only ever a hint that must re-verify.
 	const FVector SavedLocation = Record.Transform.GetLocation();
-	for (int32 Index = 0; Index < Instances->Num(); ++Index)
+	const auto IsOurs = [&](int32 Index)
 	{
 		const FRuntimeBuildableInstanceData& Data = (*Instances)[Index];
-		// Removed instances keep their array slot as a hole; IsValidOnLoad
-		// (header-inline) filters those. Two same-class instances can't
-		// coexist within 1cm, so first location match is THE instance.
-		if (!Data.IsValidOnLoad() || !Data.Transform.GetLocation().Equals(SavedLocation, 1.0f))
+		return Data.IsValidOnLoad() && Data.Transform.GetLocation().Equals(SavedLocation, LocationToleranceCm);
+	};
+
+	if (Instances->IsValidIndex(Record.RuntimeIndexHint) && IsOurs(Record.RuntimeIndexHint))
+	{
+		Record.RuntimeRef.Initialize(LightweightSubsystem, Record.BuildableClass, Record.RuntimeIndexHint);
+		return true;
+	}
+
+	// Full scan. Bind only when exactly one live instance matches: zero means
+	// it is genuinely gone (dismantled in-game) and more than one means we
+	// cannot tell them apart. Both fail closed -> 404 -> Terraform plans a
+	// recreate. Guessing instead would eventually delete the wrong buildable,
+	// which is exactly how co-located duplicates cost real foundations once.
+	int32 Found = INDEX_NONE;
+	int32 MatchCount = 0;
+	for (int32 Index = 0; Index < Instances->Num(); ++Index)
+	{
+		if (!IsOurs(Index))
 		{
 			continue;
 		}
-		Record.RuntimeRef.Initialize(LightweightSubsystem, Record.BuildableClass, Index);
-		return Record.RuntimeRef.IsValid();
+		Found = Index;
+		if (++MatchCount > 1)
+		{
+			break;
+		}
 	}
-	// No match: the instance is genuinely gone (dismantled in-game while we
-	// weren't looking) - surface as 404 so Terraform plans a recreate.
-	return false;
+
+	if (MatchCount != 1)
+	{
+		Record.RuntimeIndexHint = INDEX_NONE;
+		return false;
+	}
+
+	Record.RuntimeIndexHint = Found;
+	Record.RuntimeRef.Initialize(LightweightSubsystem, Record.BuildableClass, Found);
+	return true;
 }
 
 const FLightweightBuildableInstanceRef* ASTFRegistrySubsystem::FindLightweight(const FString& TFID)
