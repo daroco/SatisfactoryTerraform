@@ -160,8 +160,20 @@ bool ASTFRegistrySubsystem::RevalidateLightweightRecord(FSTFLightweightRecord& R
 const FLightweightBuildableInstanceRef* ASTFRegistrySubsystem::FindLightweight(const FString& TFID)
 {
 	FSTFLightweightRecord* Found = LightweightBuildables.Find(TFID);
-	if (!Found || !RevalidateLightweightRecord(*Found))
+	if (!Found)
 	{
+		return nullptr;
+	}
+	if (!RevalidateLightweightRecord(*Found))
+	{
+		// Dead record: drop it rather than leaving it to resurrect. Records
+		// resolve by class + location, so a record whose buildable is gone
+		// will happily re-bind to the NEXT buildable placed at those
+		// coordinates - and Terraform, having already dropped the id from
+		// state on the 404, then recreates there. Two records end up
+		// claiming one instance, and deleting either destroys the other's
+		// buildable. Confirmed live; pruning here closes that loop.
+		LightweightBuildables.Remove(TFID);
 		return nullptr;
 	}
 	return &Found->RuntimeRef;
@@ -180,6 +192,7 @@ TArray<ASTFRegistrySubsystem::FEntry> ASTFRegistrySubsystem::GetAll()
 			Out.Add(MoveTemp(Entry));
 		}
 	}
+	TArray<FString> DeadRecords;
 	for (auto& Pair : LightweightBuildables)
 	{
 		if (RevalidateLightweightRecord(Pair.Value))
@@ -189,6 +202,14 @@ TArray<ASTFRegistrySubsystem::FEntry> ASTFRegistrySubsystem::GetAll()
 			Entry.LightweightRef = Pair.Value.RuntimeRef;
 			Out.Add(MoveTemp(Entry));
 		}
+		else
+		{
+			DeadRecords.Add(Pair.Key); // see FindLightweight for why these must not linger
+		}
+	}
+	for (const FString& DeadID : DeadRecords)
+	{
+		LightweightBuildables.Remove(DeadID);
 	}
 	return Out;
 }

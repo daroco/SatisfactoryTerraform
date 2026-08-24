@@ -97,6 +97,16 @@ broke drift detection, the whole point of the project. `Clear()` nulls
 every resolve goes through it. The stored index is kept only as a hint that
 must re-verify before it is used.
 
+**Prune records that fail to resolve.** A record whose buildable is gone
+must be dropped, not kept around: records resolve by class + location, so
+a dead record will happily re-bind to the *next* buildable placed at those
+coordinates — and Terraform, having already dropped that `tf_id` from
+state on the 404, recreates exactly there. Two records then claim one
+instance, and deleting either destroys the other's buildable. Observed
+live: a stale record resurrected onto a freshly applied tile within
+minutes. `FindLightweight` and `GetAll` therefore remove records that fail
+revalidation.
+
 **Fail closed when ambiguous.** The scan binds only when *exactly one* live
 instance matches. Zero means genuinely dismantled; more than one means two
 buildables share a position and we cannot tell them apart. Both return
