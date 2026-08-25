@@ -1,0 +1,10 @@
+# Default owner for everything in this repo.
+* @daroco
+
+# Engine code and the plugin descriptor are write-carefully (cannot be
+# compiled outside the self-hosted build) — always route through the owner.
+/Source/         @daroco
+/*.uplugin        @daroco
+
+# CI and the self-hosted runner workflow.
+/.github/workflows/ @daroco

@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Terraform provider / API contract issues
+    url: https://github.com/daroco/terraform-provider-satisfactory/issues
+    about: For the Go provider, plan/apply behaviour, or the api/openapi.yaml contract.
+  - name: Security vulnerability
+    url: https://github.com/daroco/SatisfactoryTerraform/security/advisories/new
+    about: Report privately. Do not open a public issue — see SECURITY.md.
+  - name: Satisfactory Modding Discord
+    url: https://discord.ficsit.app/
+    about: General modding questions and help.

@@ -1,0 +1,33 @@
+name: Feature request
+description: Suggest a new capability or improvement.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Heads up: anything that changes the **API shape** (a new endpoint, a new
+        field, a new resource type) is driven from the contract in
+        [terraform-provider-satisfactory](https://github.com/daroco/terraform-provider-satisfactory)
+        (`api/openapi.yaml`), not from this repo. If your idea is a new
+        resource/endpoint, it's usually best raised there. Purely in-game
+        behaviour (how something spawns, connects, or persists) belongs here.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: The use case, not just the proposed solution.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behaviour
+      description: What should the mod do? If it affects the API, sketch the request/response.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: false
