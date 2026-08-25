@@ -18,9 +18,11 @@ then implement here.
   - `STFRegistrySubsystem` — `tf_id → actor`/lightweight-record/connection
     maps, persisted in the save game
   - `STFGameWorldModule` — SML root game-world module registering both
-- `docs/mod-ci.md` — self-hosted runner setup
-- `README.md` — implementation notes: lightweight buildables, placement
-  offsets, connections, and the war stories behind every non-obvious line
+- `docs/mod-ci.md` — self-hosted runner setup and the release/ficsit.app flow
+- `docs/architecture.md` — request lifecycle, contract, identity/drift
+- `docs/implementation-notes.md` — the war stories behind every non-obvious
+  line: lightweight buildables, placement offsets, connections, route rebinding
+- `README.md` — user-facing: what it does, install, quickstart, security
 
 ## Constraints that shape everything
 

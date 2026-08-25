@@ -1,223 +1,118 @@
 # SatisfactoryTerraform
 
-The in-game half of factory-as-code for Satisfactory: an SML mod that hosts
-the HTTP API described in the provider repo's
-[`api/openapi.yaml`](https://github.com/daroco/terraform-provider-satisfactory/blob/main/api/openapi.yaml).
-The [Terraform provider](https://github.com/daroco/terraform-provider-satisfactory)
-is its only intended client.
+[![mod-build](https://github.com/daroco/SatisfactoryTerraform/actions/workflows/mod-build.yml/badge.svg)](https://github.com/daroco/SatisfactoryTerraform/actions/workflows/mod-build.yml)
+[![License: MPL-2.0](https://img.shields.io/badge/license-MPL--2.0-blue.svg)](LICENSE)
+[![ficsit.app](https://img.shields.io/badge/ficsit.app-SatisfactoryTerraform-fa9549)](https://ficsit.app/mod/SatisfactoryTerraform)
 
-License: [MPL-2.0](LICENSE).
+**Factory-as-code for Satisfactory.** This mod runs a small HTTP API inside a
+running game session so you can place, configure, and dismantle buildings,
+belts, and power lines with [Terraform](https://www.terraform.io/) — declare
+your factory in `.tf` files, `terraform apply`, and the world updates to match.
+Griefed or hand-dismantled something? The next `plan` shows it as drift and
+`apply` rebuilds it.
 
-## Status (M0-M3 done)
+It is the **in-game half** of a two-repo project. The other half is the
+[**terraform-provider-satisfactory**](https://github.com/daroco/terraform-provider-satisfactory)
+— the Terraform provider (Go), the API contract
+([`api/openapi.yaml`](https://github.com/daroco/terraform-provider-satisfactory/blob/main/api/openapi.yaml),
+the single source of truth), and the example factories. This mod implements
+that contract; the provider is its only intended client.
 
-Functionally verified live end-to-end: `terraform apply` on
-`examples/iron-plate-line` creates all 8 resources (4 foundations, 2
-buildings, a belt, a power line) against a running game session, and the
-next `plan` shows zero drift.
+> **This is a control plane, not a read-only feed.** The API can build and
+> dismantle anything in your world. It binds to loopback only and ships CSRF
+> hardening, but read [Security](#security) before exposing the port anywhere.
+
+## Install
+
+**Recommended — Satisfactory Mod Manager (SMM):** search for
+*SatisfactoryTerraform* in [SMM](https://docs.ficsit.app/satisfactory-modding/latest/ForUsers/SatisfactoryModManager.html)
+and install. SMM handles SML and the correct game version for you.
+
+**Manual:** download `SatisfactoryTerraform-<version>.zip` from the
+[latest release](https://github.com/daroco/SatisfactoryTerraform/releases/latest)
+(or from [ficsit.app](https://ficsit.app/mod/SatisfactoryTerraform)) and extract
+it so the `.uplugin` lands at:
+
+```
+<Satisfactory install>/FactoryGame/Mods/SatisfactoryTerraform/SatisfactoryTerraform.uplugin
+```
+
+Requires [Satisfactory Mod Loader (SML)](https://ficsit.app/mod/SML) 3.11+.
+
+## Quickstart
+
+1. Install the mod (above) and load a save. The mod starts an HTTP listener on
+   `127.0.0.1:8090`. The startup log line states the posture, e.g.
+   `API listening on 127.0.0.1:8090 (loopback only; ... no auth token set)`.
+
+2. Smoke-test it with `curl` — health, then spawn one constructor:
+
+   ```sh
+   curl http://localhost:8090/api/v1/health
+
+   curl -X POST http://localhost:8090/api/v1/buildables \
+     -H 'Content-Type: application/json' \
+     -d '{"tf_id":"smoke-1","class":"Build_ConstructorMk1_C","transform":{"x":0,"y":0,"z":30000}}'
+   ```
+
+3. For real use, drive it with Terraform via the
+   [provider](https://github.com/daroco/terraform-provider-satisfactory) and its
+   examples (e.g. `examples/iron-plate-line` builds 4 foundations, a smelter and
+   constructor, a belt, and a power line). Identity is a provider-generated
+   `tf_id`, persisted in your save, so plans stay clean across save/load.
+
+## How it works
+
+```mermaid
+flowchart LR
+    TF["terraform apply"] -->|HCL| Provider["terraform-provider-satisfactory (Go)"]
+    Provider -->|"HTTP/JSON 127.0.0.1:8090"| API
+    subgraph Mod["SatisfactoryTerraform (this mod, in-game)"]
+        API["API subsystem<br/>(HTTP listener)"]
+        Registry["Registry subsystem<br/>tf_id → actor,<br/>SaveGame-persisted"]
+        API --> Registry
+    end
+```
+
+The mod is three UE subsystems/modules under
+[`Source/SatisfactoryTerraform/`](Source/SatisfactoryTerraform):
+
+- **`STFApiServerSubsystem`** — the HTTP listener (UE `HTTPServer`), route
+  handlers, and all spawn/patch/dismantle logic.
+- **`STFRegistrySubsystem`** — the `tf_id → actor` / lightweight-record /
+  connection-endpoint maps, persisted in the save game so identity survives
+  save/load and restarts.
+- **`STFGameWorldModule`** — the SML root game-world module that registers both.
+
+Deeper design docs:
+
+- [`docs/architecture.md`](docs/architecture.md) — the request lifecycle,
+  the contract, identity & drift, and the trust boundary.
+- [`docs/implementation-notes.md`](docs/implementation-notes.md) — the war
+  stories behind the non-obvious code: lightweight buildables and their
+  session-boundary self-heal, belt/wire hookup, the placement offset, route
+  rebinding across save switches, and the conveyor-attachment dismantle crash.
+  **Read the relevant section before touching that code.**
+
+## Status
+
+Milestones M0–M3 are done and verified live end-to-end: `terraform apply` on
+`examples/iron-plate-line` creates all 8 resources (4 foundations, 2 buildings,
+a belt, a power line) against a running session, and the next `plan` shows zero
+drift.
 
 - [x] Plugin/module scaffolding, SML root game-world module
-- [x] HTTP listener (UE `HTTPServer` module), bearer-token auth, JSON helpers
-- [x] Registry subsystem persisting `tf_id -> actor`/lightweight-ref/
-      connection-endpoints in the save game (see "Lightweight buildables"
-      and "Connections" below)
+- [x] Loopback HTTP listener, bearer-token auth, JSON helpers
+- [x] Registry persisting `tf_id → actor`/lightweight-ref/connection endpoints
 - [x] `GET /health`, `GET /world`, buildable spawn/read/list/delete
-- [x] Path-parameter routing (`/api/v1/buildables/:tf_id`) — `IHttpRouter`
-      does NOT prefix-match a bare trailing-slash route; GET/PATCH/DELETE-by-id
-      were unreachable until this was fixed
-- [x] `PATCH` recipe/clock (M2) — `AFGBuildableManufacturer::SetRecipe` /
-      `SetPendingPotential` (inherited from `AFGBuildableFactory`), applied
-      after `FinishSpawning` (not before — the buildable's factory
-      connectors aren't initialized yet mid-deferred-construction, and the
-      recipe silently doesn't stick), read back on GET
-- [x] Robust class resolution via an asset-registry index (M2) —
-      `ResolveClassByName` in `STFApiServerSubsystem.cpp`, shared by
-      buildable and recipe lookups
-- [x] Proper dismantle (M2) — routes through `IFGDismantleInterface` when a
-      buildable implements it, falls back to `Destroy()` otherwise
-- [x] Belts & power lines (M3) — see "Connections" below
+- [x] Path-parameter routing (`/api/v1/buildables/:tf_id`)
+- [x] `PATCH` recipe/clock on manufacturers (M2)
+- [x] Asset-registry class resolution (M2)
+- [x] Proper dismantle via `IFGDismantleInterface`, with a `Destroy()` fallback (M2)
+- [x] Lightweight-buildable tracking + session-boundary self-heal (M2)
+- [x] Belts & power lines (M3)
 
-### Lightweight buildables
-
-Simple structural buildables (foundations, walls, ramps, pipes, ...) are
-eligible for Satisfactory's Lightweight Buildable system, which destroys the
-spawned actor and migrates it to a memory-efficient non-actor representation
-shortly after placement (`AFGBuildable::ManagedByLightweightBuildableSubsystem()`).
-Manufacturers are never eligible, which is why this only ever affected
-`satisfactory_foundation`, not `satisfactory_building`.
-
-The conversion is NOT async: `AFGBuildable::BeginPlay` early-outs into
-`HandleLightweightAddition()` when `ShouldConvertToLightweight()`, adding the
-lightweight instance and destroying the actor synchronously — i.e. it has
-already happened by the time `FinishSpawning` returns inside
-`SpawnBuildable`. The mod must therefore never convert eligible buildables
-itself: an earlier version called `AddFromBuildable()` after spawning
-("deterministic conversion"), which silently **doubled** every foundation —
-two pixel-perfectly overlapping instances, ours tracked, the game's
-orphaned. That was the root cause of the entire "phantom tile" family of
-bugs (API deletes removed our copy while the orphan stayed standing;
-manual dismantling showed two instances per tile). `SpawnBuildable` now
-detects that the game converted (the actor is pending destruction after
-`FinishSpawning`) and registers the game's own instance, re-found by
-class + location (`RegisterLightweightByIdentity`). The registry tracks
-both representations per `tf_id`; the API layer (GET/DELETE) checks both.
-See `STFRegistrySubsystem.h` and the `SpawnBuildable` comments in
-`STFApiServerSubsystem.cpp` — grounded in the real
-`FGBuildable.cpp` source, not guessed.
-
-**Session-boundary self-heal.** The registry must not persist
-`FLightweightBuildableInstanceRef` itself: none of that struct's members
-(`BuildableClass`/`Transform`/`LightweightBuildableID`) carry the
-`SaveGame` flag, so a SaveGame-marked map of refs round-trips as *empty
-structs* — the root cause behind two prior failed versions of this fix
-(id-based recovery via reflection, then class+location recovery reading
-the ref's own fields: both were healing refs that had loaded back blank,
-confirmed live when 64 foundations vanished from the API after every
-relaunch while still standing in the world - issue #2). Two other real
-pitfalls discovered along the way, still relevant: the ref's
-`OwnerSubsystem` weak pointer dies every session (the subsystem actor is
-recreated), and `LightweightBuildableID` is just an index into a per-class
-array the game rebuilds on load, so a saved id can point at nothing — or
-at a *different* tile. The registry therefore stores its own
-`FSTFLightweightRecord`: SaveGame-flagged class + transform (the identity
-that actually survives), plus a Transient engine ref re-resolved through
-`GetAllLightweightBuildableInstances()` (a public, header-inline accessor,
-so no stub-source caveat) by matching class + location within 1cm.
-
-Two rules that fixed real, world-corrupting bugs and must not be
-"optimized" away:
-
-**Never trust a cached ref.** `FLightweightBuildableInstanceRef::IsValid()`
-only checks that the instance's array slot resolves to a non-null pointer,
-and the subsystem never shrinks those arrays: removal calls
-`FRuntimeBuildableInstanceData::Clear()` and recycles the slot later. So a
-ref to a *dismantled* instance keeps reporting `IsValid()` forever - which
-made the API insist a hand-dismantled foundation still existed and silently
-broke drift detection, the whole point of the project. `Clear()` nulls
-`BuiltWithRecipe`, so `IsValidOnLoad()` is the honest liveness check and
-every resolve goes through it. The stored index is kept only as a hint that
-must re-verify before it is used.
-
-**Prune records that fail to resolve.** A record whose buildable is gone
-must be dropped, not kept around: records resolve by class + location, so
-a dead record will happily re-bind to the *next* buildable placed at those
-coordinates — and Terraform, having already dropped that `tf_id` from
-state on the 404, recreates exactly there. Two records then claim one
-instance, and deleting either destroys the other's buildable. Observed
-live: a stale record resurrected onto a freshly applied tile within
-minutes. `FindLightweight` and `GetAll` therefore remove records that fail
-revalidation.
-
-**Fail closed when ambiguous.** The scan binds only when *exactly one* live
-instance matches. Zero means genuinely dismantled; more than one means two
-buildables share a position and we cannot tell them apart. Both return
-false → 404 → Terraform plans a recreate, which is safe. Picking the first
-match instead is not: two records then resolve to the same instance, and
-deleting one destroys the other's buildable. That cost 27 real foundations
-once (issue #3).
-
-### Connections (belts & power lines, M3)
-
-`SpawnConnection` handles both connection classes in `POST
-/api/v1/connections`:
-
-- **Belts** (any `Build_ConveyorBelt*_C`) spawn via
-  `UFGBuildableSpawnStrategy_Spline::RouteSpline`, driven manually through
-  the `PreSpawnBuildable`/`BeginSpawnBuildable`/`FinishSpawning`/
-  `PostSpawnBuildable` lifecycle (the same pattern the game's own
-  blueprint-driven placement uses), then wired **into** the chain with
-  `UFGFactoryConnectionComponent::SetConnection`: source output ->
-  `GetConnection0()` (belt input), `GetConnection1()` (belt output) ->
-  destination input. Wiring the two machine connectors straight to each
-  other instead — which an earlier version did, leaving the belt's own
-  connectors dangling — still moves items, but produces a world state
-  vanilla can't: a machine connector attached to another machine
-  connector. `AFGBuildableConveyorAttachment::Dismantle_Implementation`
-  assumes anything on its connectors is a conveyor and feeds the failed
-  cast into `Execute_CanDismantle`, whose `check(O != NULL)` then takes
-  the whole game down (issue #2) — including from the player's own build
-  gun, which no mod-side dismantle guard can protect.
-- **Power lines** (`Build_PowerLine_C`) connect directly via
-  `AFGBuildableWire::Connect` between two `UFGPowerConnectionComponent`s.
-
-Both ends are resolved from the registry by `from_id`/`to_id` (which may be
-a full actor or a lightweight ref — buildings are never lightweight, but
-this keeps the connector-lookup path uniform) and connector index
-(`GetFactoryConnector`/`GetPowerConnector`, sorted for factory connectors to
-match the provider's documented indexing). The spawned connection gets its
-own `tf_id` and is registered like any other buildable, plus a
-`FSTFConnectionEndpoints` entry (see `STFRegistrySubsystem.h`) recording
-which two buildables/connectors it joins, since that's not recoverable from
-the connection actor alone. `HandleConnections`/`HandleConnectionByID` use
-`GetAll()` + `FindConnectionEndpoints()` to distinguish connections from
-plain buildables sharing the same registry and produce the
-`{tf_id, class, from, to}` shape from `api/openapi.yaml`.
-
-Verified live: `terraform apply` on `examples/iron-plate-line` creates a
-belt between a smelter and constructor and a power line between the same
-two buildings, alongside 4 foundations, with a clean zero-diff `plan`
-afterward.
-
-Reference implementations this was cribbed from:
-[FactorySpawner](https://github.com/uniqueSimon/FactorySpawner) (spawning,
-belt/wire hookup) and
-[FicsitRemoteMonitoring](https://github.com/porisius/FicsitRemoteMonitoring)
-(in-game web server patterns).
-
-### Placement offset
-
-A `satisfactory_building`/`satisfactory_foundation`'s `z` is where its own
-actor origin lands, not a "sits on top of" height — there's no snapping to
-whatever's underneath, since the API places at an exact transform. Building
-a floor + machines with Terraform therefore means picking the right
-constant offset between a foundation's `z` and the `z` a machine on top of
-it needs. Calibrated live (spawn a row of constructors at several
-z-deltas on one foundation, eyeball which one sits flush - see
-the provider repo's `examples/factory-hub` "ruler" approach): **+200**, not the +100
-originally guessed in `examples/iron-plate-line`. All three `examples/*`
-foundations-and-machines layouts use `base_z + 200`. This is a fixed
-constant for these specific classes (`Build_Foundation_8x4_01_C` on top of
-`Build_SmelterMk1_C`/`Build_ConstructorMk1_C`/the conveyor attachments) -
-different foundation/machine classes would need their own calibration, and
-the API has no way to ask a class for its own footprint/pivot (see the
-`grid-2d` module's README for the same caveat on spacing).
-
-### Route rebinding across a save switch (fixed)
-
-Observed live: the *first* save loaded after launching the game routed
-fine, but switching to a *second* save without quitting the process left
-the two `:tf_id` templated routes (`/api/v1/buildables/:tf_id`,
-`/api/v1/connections/:tf_id`) returning `route_handler_not_found` for
-every request, while the non-templated routes kept working. The original
-code bound routes in `BeginPlay` and unbound them in `EndPlay` -
-correct-looking, but re-registering a path *template* on the same
-`IHttpRouter` after an unbind is where the engine quirk lives (issue #3;
-never root-caused inside the engine). The fix sidesteps it: routes are now
-bound exactly once per process (`BindRoutesOnce`) and never unbound;
-handlers dispatch through a static `ActiveInstance` weak pointer to
-whichever subsystem instance belongs to the currently loaded session, and
-return 503 when none does (main menu, mid-load). See
-`STFApiServerSubsystem.h`'s comment on `ActiveInstance`.
-
-### Conveyor attachment dismantle crash (fixed)
-
-Deleting a `satisfactory_building` that's a splitter/merger/lift
-(`AFGBuildableConveyorAttachment` and subclasses) through
-`DELETE /api/v1/buildables/:tf_id` crashed the whole game - confirmed live,
-twice, both times mid-`terraform apply` while replacing a merger/splitter
-for the placement-offset fix above. The game's own crash report:
-`Assertion failed: O != 0` in `FGDismantleInterface.gen.cpp:48`, called
-from `AFGBuildableConveyorAttachment::Dismantle_Implementation()`
-(`FGBuildableConveyorAttachment.cpp:179` - real compiled game code, not
-ours; the local SML source for both files is stub-only, so the actual
-logic isn't inspectable). Something inside that function's own dismantle
-handling calls `IFGDismantleInterface::Execute_CanDismantle()` on a null
-object in this context - not something a mod can fix, only avoid.
-`DismantleBuildable` (`STFApiServerSubsystem.cpp`) now special-cases
-`AFGBuildableConveyorAttachment` to `Destroy()` directly instead of going
-through `IFGDismantleInterface::Execute_Dismantle`, same as the existing
-fallback for classes that don't implement the interface at all. Cost: no
-build-cost refund on dismantle for this class family specifically - cheap
-for a splitter/merger, and far better than a crash.
+See [`CHANGELOG.md`](CHANGELOG.md) for the release history.
 
 ## Security
 
@@ -270,7 +165,12 @@ stops:
 - The startup log states the posture for at-a-glance audit:
   `API listening on 127.0.0.1:8090 (loopback only; host-allowlist + CSRF guards active; no auth token set)`.
 
+To report a vulnerability, follow [`SECURITY.md`](SECURITY.md) — please do not
+open a public issue.
+
 ## Building locally
+
+You only need this to develop the mod; users install the packaged release.
 
 1. Follow the [Satisfactory modding docs](https://docs.ficsit.app/) beginner
    guide: custom engine (`satisfactorymodding/UnrealEngine`), Visual Studio
@@ -281,15 +181,18 @@ stops:
 
 CI does the same thing on a self-hosted runner — see
 [`.github/workflows/mod-build.yml`](.github/workflows/mod-build.yml) and
-[`docs/mod-ci.md`](docs/mod-ci.md).
+[`docs/mod-ci.md`](docs/mod-ci.md) (which also documents cutting a release and
+publishing to ficsit.app).
 
-## Smoke test
+## Contributing
 
-With the mod loaded and a session running:
+Bug reports, features, and PRs are welcome — start with
+[`CONTRIBUTING.md`](CONTRIBUTING.md). Note that this mod **cannot be compiled in
+most local setups** (it needs Satisfactory's custom engine) and that anything
+touching the API shape starts in the
+[provider repo's](https://github.com/daroco/terraform-provider-satisfactory)
+contract.
 
-```sh
-curl http://localhost:8090/api/v1/health
-curl -X POST http://localhost:8090/api/v1/buildables \
-  -H 'Content-Type: application/json' \
-  -d '{"tf_id":"smoke-1","class":"Build_ConstructorMk1_C","transform":{"x":0,"y":0,"z":30000}}'
-```
+## License
+
+[MPL-2.0](LICENSE).
