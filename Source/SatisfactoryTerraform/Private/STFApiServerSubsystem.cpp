@@ -17,6 +17,7 @@
 #include "FGPowerConnectionComponent.h"
 #include "Tests/FGBuildableSpawnStrategy_Spline.h"
 
+#include "Misc/ConfigCacheIni.h" // GConfig - pin the listener to loopback
 #include "HttpServerModule.h"
 #include "IHttpRouter.h"
 #include "HttpServerResponse.h"
@@ -174,6 +175,33 @@ void ASTFApiServerSubsystem::BeginPlay()
 {
 	Super::BeginPlay();
 
+	// Bind to loopback only, BEFORE GetHttpRouter creates the listener.
+	//
+	// This API can build and dismantle anything in the world and has no auth
+	// by default, so it must never be reachable off-machine. UE's own code
+	// default for BindAddress is "localhost", but FactoryGame's engine config
+	// overrides it to "any" - confirmed live: the listener came up on
+	// 0.0.0.0:8090 and answered unauthenticated requests from another host on
+	// the LAN, including a full factory listing.
+	//
+	// GetListenerConfig reads a per-port entry out of the ListenerOverrides
+	// array in [HTTPServer.Listeners], so this pins only OUR port and leaves
+	// any other listener (another mod's, the game's) exactly as configured.
+	{
+		static const FString IniSection(TEXT("HTTPServer.Listeners"));
+		static const FString OverridesKey(TEXT("ListenerOverrides"));
+		const FString PortPrefix = FString::Printf(TEXT("(Port=%d,"), Port);
+
+		TArray<FString> Overrides;
+		GConfig->GetArray(*IniSection, *OverridesKey, Overrides, GEngineIni);
+		Overrides.RemoveAll([&PortPrefix](const FString& Entry)
+		{
+			return Entry.TrimStartAndEnd().StartsWith(PortPrefix);
+		});
+		Overrides.Add(FString::Printf(TEXT("(Port=%d, BindAddress=localhost)"), Port));
+		GConfig->SetArray(*IniSection, *OverridesKey, Overrides, GEngineIni);
+	}
+
 	FHttpServerModule& Module = FHttpServerModule::Get();
 	Router = Module.GetHttpRouter(Port, /*bFailOnBindFailure*/ false);
 	if (!Router.IsValid())
@@ -184,7 +212,7 @@ void ASTFApiServerSubsystem::BeginPlay()
 	ActiveInstance = this;
 	BindRoutesOnce();
 	Module.StartAllListeners();
-	UE_LOG(LogSatisfactoryTerraform, Log, TEXT("SatisfactoryTerraform API listening on port %d"), Port);
+	UE_LOG(LogSatisfactoryTerraform, Log, TEXT("SatisfactoryTerraform API listening on 127.0.0.1:%d (loopback only%s)"), Port, Token.IsEmpty() ? TEXT(", no auth token set") : TEXT(", bearer token required"));
 }
 
 void ASTFApiServerSubsystem::EndPlay(const EEndPlayReason::Type Reason)

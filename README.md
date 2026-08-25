@@ -219,6 +219,27 @@ fallback for classes that don't implement the interface at all. Cost: no
 build-cost refund on dismantle for this class family specifically - cheap
 for a splitter/merger, and far better than a crash.
 
+## Security
+
+The API can build and dismantle anything in the world, so treat the port as
+a control plane, not a read-only feed.
+
+- **Loopback only.** `BeginPlay` pins the listener to `127.0.0.1` via a
+  per-port `ListenerOverrides` entry before `GetHttpRouter` creates it.
+  This is deliberate and load-bearing: UE's own code default is
+  `localhost`, but FactoryGame's engine config overrides `DefaultBindAddress`
+  to `any`, so without the pin the listener comes up on `0.0.0.0` and
+  answers unauthenticated requests from any host on the LAN (confirmed
+  live - a full factory listing was retrieved from another machine). The
+  override targets only this mod's port, leaving other listeners alone.
+- **Bearer token** (`Token`, empty by default). When set, every `/api/v1`
+  request needs `Authorization: Bearer <token>`; `/health` included. An
+  empty token is safe *only* because of the loopback pin - set one before
+  doing anything that widens reach: port forwarding, a dedicated server,
+  or an SSH tunnel others can reach.
+- The startup log line states both facts, so a session can be audited at a
+  glance: `API listening on 127.0.0.1:8090 (loopback only, no auth token set)`.
+
 ## Building locally
 
 1. Follow the [Satisfactory modding docs](https://docs.ficsit.app/) beginner

@@ -36,7 +36,11 @@ public:
 	UPROPERTY(EditDefaultsOnly, Category = "SatisfactoryTerraform")
 	int32 Port = 8090;
 
-	/** Optional bearer token; empty disables auth (localhost use). */
+	/** Optional bearer token required on every /api/v1 request. Empty (the
+	  * default) disables auth, which is safe only because the listener is
+	  * pinned to loopback in BeginPlay - set one before doing anything that
+	  * widens that (port forwarding, a dedicated server, an SSH tunnel
+	  * others can reach). */
 	UPROPERTY(EditDefaultsOnly, Category = "SatisfactoryTerraform")
 	FString Token;
 
