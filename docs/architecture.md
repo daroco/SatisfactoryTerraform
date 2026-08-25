@@ -1,5 +1,9 @@
 # Architecture
 
+> The full request lifecycle across both halves — sequence diagram, drift
+> detection, and the security gate — lives in the provider repo:
+> [terraform-provider-satisfactory/docs/lifecycle.md](https://github.com/daroco/terraform-provider-satisfactory/blob/main/docs/lifecycle.md).
+
 ```mermaid
 flowchart LR
     TF["terraform<br/>(state)"] -->|HCL| Provider["terraform-provider-satisfactory (Go)"]
