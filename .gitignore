@@ -1,23 +1,39 @@
-# Go
-/bin/
-*.test
-*.out
+# Unreal Engine / SML mod build output.
+# The repo root IS the plugin; CI copies it into the SML starter project's
+# Mods/ dir and builds there, so nothing under these paths should be committed.
 
-# Terraform (examples run locally against the mock)
-**/.terraform/
-**/.terraform.lock.hcl
-*.tfstate
-*.tfstate.backup
-crash.log
+# Compiled binaries and intermediates
+Binaries/
+Intermediate/
+Build/
+DerivedDataCache/
+Saved/
 
-# Unreal Engine (mod dir is source-only; build output stays local)
-mod/Binaries/
-mod/Intermediate/
-mod/Saved/
-mod/DerivedDataCache/
+# Object / precompiled-header / debug files
+*.o
+*.obj
+*.slo
+*.lo
+*.gch
+*.pch
 *.pdb
 
-# Editor/OS noise
+# Generated project files
+*.sln
+*.suo
+*.xcodeproj
+*.xcworkspace
+*.VC.db
+*.VC.opendb
+*.sdf
+*.opensdf
+
+# Built map data
+*_BuiltData.uasset
+
+# Editor / IDE / OS noise
+.vs/
 .vscode/
 .idea/
 .DS_Store
+Thumbs.db

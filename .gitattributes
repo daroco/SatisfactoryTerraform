@@ -1,0 +1,26 @@
+# Normalize line endings for text; Git decides what is text by inspection.
+* text=auto
+
+# Keep shell scripts and patches LF regardless of platform.
+*.sh    text eol=lf
+*.patch text eol=lf
+
+# This mod is code-only today, but Satisfactory mods are UE plugins that
+# routinely carry binary content. Track the standard Unreal binary asset
+# types with Git LFS so history stays lean if content is ever added, matching
+# the convention used by ExampleMod / FicsIt-Networks.
+*.uasset  filter=lfs diff=lfs merge=lfs -text
+*.umap    filter=lfs diff=lfs merge=lfs -text
+
+# Common binary media (mod icon, banners, audio) via LFS as well.
+*.png  filter=lfs diff=lfs merge=lfs -text
+*.jpg  filter=lfs diff=lfs merge=lfs -text
+*.jpeg filter=lfs diff=lfs merge=lfs -text
+*.gif  filter=lfs diff=lfs merge=lfs -text
+*.wav  filter=lfs diff=lfs merge=lfs -text
+*.ogg  filter=lfs diff=lfs merge=lfs -text
+*.ico  filter=lfs diff=lfs merge=lfs -text
+
+# Force these to be treated as binary (never line-ending-normalized).
+*.pdf binary
+*.zip binary
