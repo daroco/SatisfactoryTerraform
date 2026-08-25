@@ -58,7 +58,19 @@ private:
 	TSharedPtr<IHttpRouter> Router;
 
 	void BindRoutesOnce();
-	bool CheckAuth(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete) const;
+
+	/** Transport-level guard run on EVERY request, including /health. In
+	  * order: Host allowlist (loopback only - defeats DNS rebinding), reject
+	  * any Origin header (a real Terraform client never sends one; a
+	  * cross-origin browser always does), require application/json on mutating
+	  * verbs (forces a browser preflight this server never answers). Returns
+	  * false and completes an error response on failure. Carries no token
+	  * check, so /health stays reachable without credentials. */
+	bool CheckTransport(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete) const;
+
+	/** CheckTransport plus the optional bearer token; the gate for every
+	  * handler that reads or mutates world state. See README.md "Security". */
+	bool CheckRequest(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete) const;
 
 	// Route handlers.
 	bool HandleHealth(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete);

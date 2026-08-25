@@ -222,23 +222,53 @@ for a splitter/merger, and far better than a crash.
 ## Security
 
 The API can build and dismantle anything in the world, so treat the port as
-a control plane, not a read-only feed.
+a control plane, not a read-only feed. `CheckRequest` / `CheckTransport` in
+`STFApiServerSubsystem.cpp` gate every request; the layers, and what each
+stops:
+
+| Attack path | Stopped by |
+|---|---|
+| Remote host on the LAN / internet | Loopback bind (the listener is not reachable off-machine at all) |
+| Malicious web page, plain cross-origin | `Origin` rejection + JSON `Content-Type` requirement |
+| Malicious web page via DNS rebinding | `Host` allowlist |
+| A tunnel someone forwards to the port (`ssh -L 8090:localhost:8090 …`) | Bearer token — the forwarded connection arrives as loopback with a `localhost` Host, so it passes every CSRF check; the token is the only thing left |
+| Another local process running as you | Bearer token, weakly (it can read the env var); not fully solvable here |
 
 - **Loopback only.** `BeginPlay` pins the listener to `127.0.0.1` via a
   per-port `ListenerOverrides` entry before `GetHttpRouter` creates it.
-  This is deliberate and load-bearing: UE's own code default is
-  `localhost`, but FactoryGame's engine config overrides `DefaultBindAddress`
-  to `any`, so without the pin the listener comes up on `0.0.0.0` and
-  answers unauthenticated requests from any host on the LAN (confirmed
-  live - a full factory listing was retrieved from another machine). The
-  override targets only this mod's port, leaving other listeners alone.
-- **Bearer token** (`Token`, empty by default). When set, every `/api/v1`
-  request needs `Authorization: Bearer <token>`; `/health` included. An
-  empty token is safe *only* because of the loopback pin - set one before
-  doing anything that widens reach: port forwarding, a dedicated server,
-  or an SSH tunnel others can reach.
-- The startup log line states both facts, so a session can be audited at a
-  glance: `API listening on 127.0.0.1:8090 (loopback only, no auth token set)`.
+  Load-bearing: UE's own code default is `localhost`, but FactoryGame's
+  engine config overrides `DefaultBindAddress` to `any`, so without the pin
+  the listener comes up on `0.0.0.0` and answers unauthenticated requests
+  from any host on the LAN (confirmed live — a full factory listing was
+  retrieved from another machine). The override targets only this mod's
+  port, leaving other listeners alone.
+- **CSRF hardening**, applied to every request including `/health`
+  (`CheckTransport`): the `Host` header must be loopback (defeats DNS
+  rebinding, where a page reaches `127.0.0.1` under an attacker hostname);
+  any `Origin` header is rejected (the Terraform client never sends one, a
+  cross-origin browser always does); and mutating verbs must send
+  `Content-Type: application/json` (`text/plain`/form/multipart are CORS
+  "simple" types a page can POST without a preflight, so requiring JSON
+  forces a preflight this server never answers). None of these inconvenience
+  the Go client, which already sends JSON and no `Origin`.
+- **Bearer token**, optional and **empty by default** (`CheckRequest`). When
+  set, every `/api/v1` request except `/health` needs
+  `Authorization: Bearer <token>`. For plain single-player it is not needed —
+  the loopback bind and CSRF layer already cover the reachable threats — so
+  it is defense-in-depth there. It becomes the *only* guard the moment the
+  port is reachable through something that presents as loopback, the tunnel
+  case above; set one before doing that. Configure it by exporting
+  `SATISFACTORY_TOKEN` before launching the game (`BeginPlay` reads it when
+  the config value is empty); the Terraform provider reads the same variable,
+  so one value configures both halves. The environment is captured at process
+  start, so restart the game (and Steam, since it spawns the game) after
+  changing it.
+
+  (Binding beyond loopback — e.g. a dedicated server on `0.0.0.0` — is not a
+  supported configuration yet: `BeginPlay` pins the bind unconditionally.
+  When that lands, the `Host` allowlist will need to relax in tandem.)
+- The startup log states the posture for at-a-glance audit:
+  `API listening on 127.0.0.1:8090 (loopback only; host-allowlist + CSRF guards active; no auth token set)`.
 
 ## Building locally
 

@@ -18,6 +18,7 @@
 #include "Tests/FGBuildableSpawnStrategy_Spline.h"
 
 #include "Misc/ConfigCacheIni.h" // GConfig - pin the listener to loopback
+#include "HAL/PlatformMisc.h"    // FPlatformMisc::GetEnvironmentVariable (token)
 #include "HttpServerModule.h"
 #include "IHttpRouter.h"
 #include "HttpServerResponse.h"
@@ -202,6 +203,16 @@ void ASTFApiServerSubsystem::BeginPlay()
 		GConfig->SetArray(*IniSection, *OverridesKey, Overrides, GEngineIni);
 	}
 
+	// Let SATISFACTORY_TOKEN fill in the bearer token when the (EditDefaultsOnly)
+	// UPROPERTY is empty - which it is by default, so this is the only way a
+	// user can actually set one. The provider reads the same variable, so one
+	// env var configures both halves. Read once here: the environment is fixed
+	// at process start, so changing it needs a game restart.
+	if (Token.IsEmpty())
+	{
+		Token = FPlatformMisc::GetEnvironmentVariable(TEXT("SATISFACTORY_TOKEN"));
+	}
+
 	FHttpServerModule& Module = FHttpServerModule::Get();
 	Router = Module.GetHttpRouter(Port, /*bFailOnBindFailure*/ false);
 	if (!Router.IsValid())
@@ -212,7 +223,9 @@ void ASTFApiServerSubsystem::BeginPlay()
 	ActiveInstance = this;
 	BindRoutesOnce();
 	Module.StartAllListeners();
-	UE_LOG(LogSatisfactoryTerraform, Log, TEXT("SatisfactoryTerraform API listening on 127.0.0.1:%d (loopback only%s)"), Port, Token.IsEmpty() ? TEXT(", no auth token set") : TEXT(", bearer token required"));
+	UE_LOG(LogSatisfactoryTerraform, Log,
+		TEXT("SatisfactoryTerraform API listening on 127.0.0.1:%d (loopback only; host-allowlist + CSRF guards active; %s)"),
+		Port, Token.IsEmpty() ? TEXT("no auth token set") : TEXT("bearer token required"));
 }
 
 void ASTFApiServerSubsystem::EndPlay(const EEndPlayReason::Type Reason)
@@ -280,14 +293,94 @@ void ASTFApiServerSubsystem::BindRoutesOnce()
 		&ASTFApiServerSubsystem::HandleConnectionByID);
 }
 
-bool ASTFApiServerSubsystem::CheckAuth(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete) const
+namespace
 {
+	/** First value of a header, or empty. The UE HTTP server lowercases every
+	  * header key on ingest (HttpConnectionRequestReadContext.cpp), so all
+	  * lookups here use lowercase keys. */
+	FString FirstHeader(const FHttpServerRequest& Request, const TCHAR* LowercaseKey)
+	{
+		const TArray<FString>* Values = Request.Headers.Find(LowercaseKey);
+		return (Values && Values->Num() > 0) ? (*Values)[0] : FString();
+	}
+
+	/** True if the Host header names this machine. Accepts an empty host
+	  * (HTTP/1.0 clients, some tools) since the loopback bind already means
+	  * the connection reached us over the loopback interface; the check exists
+	  * to defeat DNS rebinding, where the browser sends a *foreign* hostname. */
+	bool IsLoopbackHost(const FString& HostHeader)
+	{
+		if (HostHeader.IsEmpty())
+		{
+			return true;
+		}
+		FString Host = HostHeader;
+		// Strip a :port suffix. IPv6 literals are bracketed ("[::1]:8090"), so
+		// only split on the last colon when there's no closing bracket after it.
+		int32 Colon;
+		if (Host.FindLastChar(TEXT(':'), Colon) && !Host.RightChop(Colon).Contains(TEXT("]")))
+		{
+			Host = Host.Left(Colon);
+		}
+		Host.TrimStartAndEndInline();
+		// IPv6 loopback in a Host header is always bracketed per RFC 3986
+		// ("[::1]"); a bare "::1" is malformed and correctly falls through to
+		// a 403.
+		return Host.Equals(TEXT("localhost"), ESearchCase::IgnoreCase)
+			|| Host == TEXT("127.0.0.1")
+			|| Host == TEXT("[::1]");
+	}
+}
+
+bool ASTFApiServerSubsystem::CheckTransport(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete) const
+{
+	// Host allowlist: the listener is pinned to loopback, but a page using DNS
+	// rebinding connects to 127.0.0.1 while carrying an attacker hostname in
+	// Host. Rejecting non-loopback hosts closes that path.
+	if (!IsLoopbackHost(FirstHeader(Request, TEXT("host"))))
+	{
+		OnComplete(ErrorResponse(403, TEXT("host not allowed")));
+		return false;
+	}
+
+	// Any Origin header means a browser is making a cross-origin request. The
+	// Terraform client never sends one, so its mere presence is hostile.
+	if (!FirstHeader(Request, TEXT("origin")).IsEmpty())
+	{
+		OnComplete(ErrorResponse(403, TEXT("cross-origin requests are not allowed")));
+		return false;
+	}
+
+	// Mutating verbs must be application/json. text/plain, form, and multipart
+	// are CORS "simple" content types a page can POST without a preflight;
+	// requiring JSON forces a preflight (which this server never answers) for
+	// any browser-driven write. The Go client always sends this on bodies.
+	const bool bIsMutating = EnumHasAnyFlags(Request.Verb,
+		EHttpServerRequestVerbs::VERB_POST | EHttpServerRequestVerbs::VERB_PATCH | EHttpServerRequestVerbs::VERB_PUT);
+	if (bIsMutating && !FirstHeader(Request, TEXT("content-type")).StartsWith(TEXT("application/json")))
+	{
+		OnComplete(ErrorResponse(415, TEXT("Content-Type must be application/json")));
+		return false;
+	}
+
+	return true;
+}
+
+bool ASTFApiServerSubsystem::CheckRequest(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete) const
+{
+	if (!CheckTransport(Request, OnComplete))
+	{
+		return false;
+	}
+
+	// Optional bearer token. Empty (default) means no auth, which is safe only
+	// because of the loopback pin + the transport checks above; set
+	// SATISFACTORY_TOKEN for any non-loopback deployment (see BeginPlay).
 	if (Token.IsEmpty())
 	{
 		return true;
 	}
-	const TArray<FString>* Auth = Request.Headers.Find(TEXT("Authorization"));
-	if (Auth && Auth->Num() > 0 && (*Auth)[0] == FString::Printf(TEXT("Bearer %s"), *Token))
+	if (FirstHeader(Request, TEXT("authorization")) == FString::Printf(TEXT("Bearer %s"), *Token))
 	{
 		return true;
 	}
@@ -297,6 +390,14 @@ bool ASTFApiServerSubsystem::CheckAuth(const FHttpServerRequest& Request, const 
 
 bool ASTFApiServerSubsystem::HandleHealth(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete)
 {
+	// Health needs no token (it's how a client probes whether the mod is up
+	// before it has anything to authenticate against), but it still runs the
+	// transport guard so a rebinding/cross-origin page can't even confirm the
+	// API exists.
+	if (!CheckTransport(Request, OnComplete))
+	{
+		return true;
+	}
 	const TSharedPtr<FJsonObject> Body = MakeShared<FJsonObject>();
 	Body->SetStringField(TEXT("status"), TEXT("ok"));
 	OnComplete(JsonResponse(200, Body));
@@ -305,7 +406,7 @@ bool ASTFApiServerSubsystem::HandleHealth(const FHttpServerRequest& Request, con
 
 bool ASTFApiServerSubsystem::HandleWorld(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete)
 {
-	if (!CheckAuth(Request, OnComplete))
+	if (!CheckRequest(Request, OnComplete))
 	{
 		return true;
 	}
@@ -319,7 +420,7 @@ bool ASTFApiServerSubsystem::HandleWorld(const FHttpServerRequest& Request, cons
 
 bool ASTFApiServerSubsystem::HandleBuildables(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete)
 {
-	if (!CheckAuth(Request, OnComplete))
+	if (!CheckRequest(Request, OnComplete))
 	{
 		return true;
 	}
@@ -374,7 +475,7 @@ bool ASTFApiServerSubsystem::HandleBuildables(const FHttpServerRequest& Request,
 
 bool ASTFApiServerSubsystem::HandleBuildableByID(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete)
 {
-	if (!CheckAuth(Request, OnComplete))
+	if (!CheckRequest(Request, OnComplete))
 	{
 		return true;
 	}
@@ -467,7 +568,7 @@ bool ASTFApiServerSubsystem::HandleBuildableByID(const FHttpServerRequest& Reque
 
 bool ASTFApiServerSubsystem::HandleConnections(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete)
 {
-	if (!CheckAuth(Request, OnComplete))
+	if (!CheckRequest(Request, OnComplete))
 	{
 		return true;
 	}
@@ -519,7 +620,7 @@ bool ASTFApiServerSubsystem::HandleConnections(const FHttpServerRequest& Request
 
 bool ASTFApiServerSubsystem::HandleConnectionByID(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete)
 {
-	if (!CheckAuth(Request, OnComplete))
+	if (!CheckRequest(Request, OnComplete))
 	{
 		return true;
 	}
