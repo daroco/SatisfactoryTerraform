@@ -1,13 +1,13 @@
 ---
 name: steward
-description: Repo-specific guidance for driving PRs and CI on SatisfactoryTerraform - which checks gate what, how to babysit the self-hosted mod build, and the hard rules that protect the owner's PC.
+description: Repo-specific guidance for driving PRs and CI on SatisfactoryTerraform - which checks gate what, how to babysit the self-hosted mod build, and the hard rules that keep the runner safe.
 ---
 
 # Stewarding SatisfactoryTerraform CI and PRs
 
 ## Which checks matter
 
-- **mod-build** (self-hosted Windows runner on the owner's gaming PC) builds
+- **mod-build** (self-hosted Windows runner) builds
   and packages the UE mod - it is this repo's only CI and its merge gate.
   Never leave it red silently: diagnose from job logs and either fix the
   workflow or report exactly what the owner must do (secrets, runner state).
@@ -40,11 +40,11 @@ Read the failing step first; the workflow fails fast with explicit messages.
 - Engine download/extract takes ~1h on first run and is cached at `C:\CI\UE`
   afterwards; a long-running job is not a hung job.
 
-## Hard rules (protect the owner's PC)
+## Hard rules (runner safety)
 
 - **Never add `pull_request` / `pull_request_target` triggers to
-  mod-build.yml.** The self-hosted runner executes checked-out code on the
-  owner's personal machine. Push-to-trusted-branches + workflow_dispatch only.
+  mod-build.yml.** A self-hosted runner executes whatever the workflow
+  checks out. Push-to-trusted-branches + workflow_dispatch only.
 - Never echo or log secrets; never widen secret usage beyond the steps that
   need them.
 - Don't "fix" a red mod-build by deleting its checks or making steps

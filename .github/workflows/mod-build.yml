@@ -15,7 +15,7 @@
 #       WWISE_EMAIL / WWISE_PASSWORD - Audiokinetic credentials for wwise-cli.
 #
 # SECURITY: runs only on push to trusted branches + manual dispatch. Never add
-# pull_request here — fork PRs would execute arbitrary code on your PC.
+# pull_request here — fork PRs would execute arbitrary code on the runner.
 
 name: mod-build
 

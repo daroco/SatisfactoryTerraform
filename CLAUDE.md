@@ -43,11 +43,11 @@ then implement here.
 
 ## CI
 
-- `mod-build` (self-hosted Windows runner on the owner's PC): compiles and
+- `mod-build` (self-hosted Windows runner): compiles and
   packages the mod (Windows client + Windows dedicated server; Linux server
   needs a cross-compile toolchain, descoped). Engine cached at `C:\CI\UE`,
   Wwise at `C:\CI\Wwise`. Secrets: `ENGINE_GH_TOKEN`, `WWISE_EMAIL`,
   `WWISE_PASSWORD`.
-  **Never add `pull_request` triggers** — self-hosted runner on a personal
-  machine. Babysitting guidance: `.claude/skills/steward/SKILL.md` and
+  **Never add `pull_request` triggers** — a self-hosted runner executes
+  whatever the workflow checks out. Babysitting guidance: `.claude/skills/steward/SKILL.md` and
   `docs/mod-ci.md`.

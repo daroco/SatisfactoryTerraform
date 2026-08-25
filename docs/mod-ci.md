@@ -10,7 +10,7 @@ self-hosted runner that keeps the engine on disk between runs.
 
 ### 1. Runner machine (done ✅ if the runner shows green in Settings → Actions → Runners)
 
-A Windows 10/11 machine (your gaming PC is fine) following
+A Windows 10/11 machine following
 [Panakotta00's Satisfactory Modding CI Setup gist](https://gist.github.com/Panakotta00/2a30df9297ed3d6f7e0e11f30314bcae):
 
 - Git, Git LFS, 7zip, GitHub CLI (`gh`)
@@ -66,4 +66,4 @@ and
 The workflow triggers only on pushes to `main`/`claude/**` and manual
 dispatch. **Never add `pull_request` triggers**: a self-hosted runner executes
 whatever the workflow checks out, and fork PRs would run arbitrary code on
-your PC.
+it.
