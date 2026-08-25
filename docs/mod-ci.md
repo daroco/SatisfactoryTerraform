@@ -44,7 +44,8 @@ tool SML's own CI uses) to download and integrate the SDK, cached under
 ## What a run does
 
 1. Checks out `satisfactorymodding/SatisfactoryModLoader` (the modding starter
-   project) and copies `mod/` into `Mods/SatisfactoryTerraform/`.
+   project) and copies this repo (the plugin root) into
+   `Mods/SatisfactoryTerraform/`.
 2. Downloads + extracts the engine to `C:\CI\UE` (first run only; ~1 h).
 3. Integrates Wwise, generates project files, builds editor binaries.
 4. Runs UAT `PackagePlugin` for Win64 client + Windows dedicated server.
@@ -61,9 +62,55 @@ references when something breaks:
 and
 [FicsIt-Networks' build.yml](https://github.com/Panakotta00/FicsIt-Networks/blob/development/.github/workflows/build.yml).
 
+## Releasing
+
+`release.yml` publishes a tagged release. It runs on a **GitHub-hosted** runner
+(never the self-hosted machine) and does **not** build — it reuses the `.zip`
+that `mod-build` already packaged, so cutting a release costs no runner time.
+
+Release steps:
+
+1. Land the changes on `main` and let `mod-build` package them (it runs on
+   pushes touching `Source/**`, or trigger it manually via **workflow_dispatch**
+   on the release commit). Confirm that run is green.
+2. Bump `SemVersion`/`VersionName` in `SatisfactoryTerraform.uplugin` and add a
+   `CHANGELOG.md` entry for the new version.
+3. Tag and push: `git tag v0.1.0 && git push origin v0.1.0`.
+
+`release.yml` then downloads the newest successful `mod-build` artifact, creates
+a GitHub Release with the `.zip` attached, and — if configured — uploads to
+ficsit.app.
+
+### ficsit.app (SMR) publishing — one-time owner setup
+
+The SMR upload uses the official [`ficsit-cli`](https://github.com/satisfactorymodding/ficsit-cli)
+(`ficsit smr upload <mod-id> <file> <changelog>`). To enable it:
+
+1. **Create the mod listing once** on <https://ficsit.app> (Upload a mod). SMR
+   reads `SatisfactoryTerraform.uplugin` for the mod reference, name,
+   description, SemVersion, and `GameVersion`; it also expects a mod icon
+   (`Resources/Icon128.png`) — see the icon note below. Creating the listing
+   yields the **mod ID**.
+2. Add a repo **variable** `SMR_MOD_ID` = that mod ID (Settings → Secrets and
+   variables → Actions → **Variables**). While it is unset, `release.yml` still
+   creates the GitHub Release and just skips the SMR upload.
+3. Create a ficsit.app **API key** (ficsit.app → profile → API keys) and add it
+   as a repo **secret** `SMR_API_KEY`. Never commit or echo it.
+
+Uploaded versions are virus-scanned and approved asynchronously on SMR; the
+GitHub Release is created immediately regardless.
+
+### Mod icon (owner to-do)
+
+SMR listings show a 128×128 icon at `Resources/Icon128.png`. This repo does not
+ship one yet — add a real PNG there before (or when) creating the listing.
+`.gitattributes` already routes `*.png` through Git LFS, so ensure Git LFS is
+installed (`git lfs install`) before committing it.
+
 ## Security
 
-The workflow triggers only on pushes to `main`/`claude/**` and manual
+The build workflow triggers only on pushes to `main`/`claude/**` and manual
 dispatch. **Never add `pull_request` triggers**: a self-hosted runner executes
-whatever the workflow checks out, and fork PRs would run arbitrary code on
-it.
+whatever the workflow checks out, and fork PRs would run arbitrary code on it.
+`release.yml` is safe to tag-trigger because it runs on a hosted runner and only
+consumes an already-built artifact.

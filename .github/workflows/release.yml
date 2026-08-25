@@ -1,0 +1,144 @@
+# Publishes a tagged release: creates a GitHub Release from the packaged mod
+# and (optionally) uploads it to the Satisfactory Mod Repository (ficsit.app).
+#
+# This runs on a GitHub-HOSTED runner, so it never touches the self-hosted
+# machine and never triggers a build itself. It reuses the .zip that the
+# `mod-build` workflow already packaged. The release process is therefore:
+#
+#   1. Land your changes on `main`; let `mod-build` package them (it runs on
+#      pushes that touch Source/**, or trigger it manually via workflow_dispatch
+#      on the release commit). Confirm that run is green and produced the
+#      `SatisfactoryTerraform` artifact.
+#   2. Bump SemVersion/VersionName in SatisfactoryTerraform.uplugin and update
+#      CHANGELOG.md.
+#   3. Tag and push:  git tag v0.1.0 && git push origin v0.1.0
+#
+# This workflow then grabs the newest successful mod-build artifact, publishes a
+# GitHub Release, and uploads to SMR.
+#
+# OWNER PREREQUISITES (see docs/mod-ci.md → "Releasing"):
+#   - Create the mod listing on https://ficsit.app once, to get its mod ID.
+#   - Repo variable  SMR_MOD_ID   = that mod ID (Settings → Secrets and
+#     variables → Actions → Variables). If unset, the SMR upload is skipped and
+#     only the GitHub Release is created.
+#   - Repo secret     SMR_API_KEY  = a ficsit.app API key with upload rights
+#     (ficsit.app → your profile → API keys).
+
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to (re)publish, e.g. v0.1.0
+        required: true
+
+# Least privilege: create the GitHub Release, and read Actions to fetch the
+# packaged artifact from the mod-build run.
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  release:
+    name: Publish release
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Resolve tag and version
+        id: v
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          if [ -z "$TAG" ]; then echo "Could not resolve a tag."; exit 1; fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "Releasing tag $TAG (version ${TAG#v})"
+
+      - name: Download packaged mod from the latest successful mod-build
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUN_ID=$(gh run list --workflow mod-build.yml --status success \
+            --limit 1 --json databaseId --jq '.[0].databaseId')
+          if [ -z "$RUN_ID" ]; then
+            echo "::error::No successful mod-build run found. Run mod-build on the release commit first (see this workflow's header)."
+            exit 1
+          fi
+          echo "Using mod-build run $RUN_ID"
+          mkdir -p dist
+          gh run download "$RUN_ID" --name SatisfactoryTerraform --dir dist
+          ZIP=$(find dist -type f -name '*.zip' | head -n1)
+          if [ -z "$ZIP" ]; then
+            echo "::error::mod-build artifact contained no .zip."
+            exit 1
+          fi
+          # Normalize to a predictable, versioned name.
+          FINAL="SatisfactoryTerraform-${{ steps.v.outputs.version }}.zip"
+          cp "$ZIP" "$FINAL"
+          echo "ASSET=$FINAL" >> "$GITHUB_ENV"
+          echo "Packaged asset: $FINAL"
+
+      - name: Extract changelog for this version
+        id: notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          VER="${{ steps.v.outputs.version }}"
+          NOTES_FILE="release-notes.md"
+          # Pull the "## [VER] ..." section out of CHANGELOG.md, if present.
+          if [ -f CHANGELOG.md ] && grep -q "## \[$VER\]" CHANGELOG.md; then
+            awk -v ver="$VER" '
+              $0 ~ ("^## \\[" ver "\\]") {grab=1; next}
+              grab && /^## \[/ {exit}
+              grab {print}
+            ' CHANGELOG.md > "$NOTES_FILE"
+          else
+            echo "Release $VER. See CHANGELOG.md." > "$NOTES_FILE"
+          fi
+          # Guard against an empty file (ficsit-cli wants a non-empty changelog).
+          if [ ! -s "$NOTES_FILE" ]; then echo "Release $VER." > "$NOTES_FILE"; fi
+          echo "notes_file=$NOTES_FILE" >> "$GITHUB_OUTPUT"
+
+      - name: Create or update the GitHub Release
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.v.outputs.tag }}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$ASSET" --clobber
+          else
+            gh release create "$TAG" "$ASSET" \
+              --title "$TAG" \
+              --notes-file "${{ steps.notes.outputs.notes_file }}"
+          fi
+
+      - name: Upload to ficsit.app (SMR)
+        if: ${{ vars.SMR_MOD_ID != '' }}
+        env:
+          SMR_API_KEY: ${{ secrets.SMR_API_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${SMR_API_KEY:-}" ]; then
+            echo "::error::SMR_MOD_ID is set but secret SMR_API_KEY is missing."
+            exit 1
+          fi
+          # ficsit-cli is the official CLI; install the released .deb.
+          curl -fsSL -o ficsit.deb \
+            https://github.com/satisfactorymodding/ficsit-cli/releases/latest/download/ficsit_linux_amd64.deb
+          sudo dpkg -i ficsit.deb
+          ficsit --api-key "$SMR_API_KEY" smr upload \
+            "${{ vars.SMR_MOD_ID }}" "$ASSET" "$(cat "${{ steps.notes.outputs.notes_file }}")"
+
+      - name: Note when SMR upload was skipped
+        if: ${{ vars.SMR_MOD_ID == '' }}
+        run: echo "::notice::SMR_MOD_ID not set — created the GitHub Release only. Create the ficsit.app listing and set SMR_MOD_ID to enable automatic publishing."
