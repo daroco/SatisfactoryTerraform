@@ -1,0 +1,118 @@
+# Fast, hosted checks that CAN run on pull requests.
+#
+# mod-build (the real compile) deliberately has no pull_request trigger: it
+# runs on a self-hosted runner, and a fork PR would execute arbitrary code on
+# it. That makes mod-build unusable as a required status check for outside
+# contributions, since it never reports on a PR. This workflow is the
+# PR-side gate instead - it validates everything that can be checked without
+# the engine, and guards the rules that keep the self-hosted runner safe.
+#
+# mod-build still runs on pushes to main/claude/** and remains the real
+# verification that the mod compiles and packages.
+
+name: pr-check
+
+on:
+  pull_request:
+  push:
+    branches: [main, "claude/**"]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Plugin descriptor is valid and self-consistent
+        run: |
+          python3 - <<'PY'
+          import json, pathlib, sys
+
+          uplugins = list(pathlib.Path(".").glob("*.uplugin"))
+          if len(uplugins) != 1:
+              sys.exit(f"expected exactly one .uplugin at the repo root, found {uplugins}")
+          up = uplugins[0]
+
+          try:
+              data = json.loads(up.read_text(encoding="utf-8-sig"))
+          except json.JSONDecodeError as e:
+              sys.exit(f"{up}: not valid JSON: {e}")
+
+          for field in ("FriendlyName", "SemVersion", "Modules"):
+              if not data.get(field):
+                  sys.exit(f"{up}: missing required field {field!r}")
+
+          modules = data["Modules"]
+          if not isinstance(modules, list) or not modules:
+              sys.exit(f"{up}: Modules must be a non-empty list")
+
+          # The module name has to match both the .uplugin stem and the
+          # Source/<Name>/<Name>.Build.cs layout, or UBT will not find it.
+          name = modules[0].get("Name")
+          if name != up.stem:
+              sys.exit(f"module name {name!r} != plugin file name {up.stem!r}")
+
+          build_cs = pathlib.Path("Source") / name / f"{name}.Build.cs"
+          if not build_cs.is_file():
+              sys.exit(f"missing {build_cs} for module {name!r}")
+
+          # SML is what the mod loads under; losing this dependency silently
+          # produces a plugin the loader ignores.
+          plugins = {p.get("Name") for p in data.get("Plugins", [])}
+          if "SML" not in plugins:
+              sys.exit(f"{up}: SML must be listed as a plugin dependency")
+
+          print(f"ok: {up.name}, module {name}, SemVersion {data['SemVersion']}")
+          PY
+
+      - name: mod-build must not be reachable from forks
+        run: |
+          python3 - <<'PY'
+          import pathlib, sys, re
+
+          wf = pathlib.Path(".github/workflows/mod-build.yml")
+          if not wf.is_file():
+              sys.exit("mod-build.yml is missing")
+
+          text = wf.read_text(encoding="utf-8")
+          # Strip comments so the prose explaining the rule cannot trip it.
+          code = "\n".join(re.sub(r"#.*$", "", line) for line in text.splitlines())
+
+          for trigger in ("pull_request_target", "pull_request"):
+              if re.search(rf"^\s*{trigger}\s*:", code, re.MULTILINE):
+                  sys.exit(
+                      f"mod-build.yml declares a {trigger} trigger. It runs on a "
+                      "self-hosted runner, so a fork PR would execute arbitrary "
+                      "code on that machine. Use push to trusted branches plus "
+                      "workflow_dispatch instead."
+                  )
+
+          print("ok: mod-build is push/dispatch only")
+          PY
+
+      - name: Source tree sanity
+        run: |
+          python3 - <<'PY'
+          import pathlib, sys
+
+          src = pathlib.Path("Source")
+          if not src.is_dir():
+              sys.exit("no Source/ directory")
+
+          bad = []
+          for f in src.rglob("*"):
+              if f.suffix.lower() not in {".h", ".cpp", ".cs"}:
+                  continue
+              try:
+                  f.read_text(encoding="utf-8")
+              except UnicodeDecodeError as e:
+                  bad.append(f"{f}: not valid UTF-8 ({e})")
+          if bad:
+              sys.exit("\n".join(bad))
+
+          count = sum(1 for _ in src.rglob("*.cpp")) + sum(1 for _ in src.rglob("*.h"))
+          print(f"ok: {count} C++ sources, all UTF-8")
+          PY
