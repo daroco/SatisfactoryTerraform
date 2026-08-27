@@ -34,19 +34,96 @@ void ASTFRegistrySubsystem::RegisterLightweight(const FString& TFID, const FLigh
 	LightweightBuildables.Add(TFID, MoveTemp(Record));
 }
 
-bool ASTFRegistrySubsystem::RegisterLightweightByIdentity(const FString& TFID, TSubclassOf<AFGBuildable> BuildableClass, const FTransform& Transform)
+TSet<int32> ASTFRegistrySubsystem::SnapshotLiveIndices(TSubclassOf<AFGBuildable> BuildableClass) const
 {
+	TSet<int32> Out;
+	AFGLightweightBuildableSubsystem* Sub = AFGLightweightBuildableSubsystem::Get(GetWorld());
+	if (!Sub || !BuildableClass)
+	{
+		return Out;
+	}
+	const TArray<FRuntimeBuildableInstanceData>* Instances =
+		Sub->GetAllLightweightBuildableInstances().Find(BuildableClass);
+	if (!Instances)
+	{
+		return Out; // no instances of this class yet - normal, not an error
+	}
+	for (int32 Index = 0; Index < Instances->Num(); ++Index)
+	{
+		if ((*Instances)[Index].IsValidOnLoad())
+		{
+			Out.Add(Index);
+		}
+	}
+	return Out;
+}
+
+ASTFRegistrySubsystem::EAdoptResult ASTFRegistrySubsystem::AdoptSpawnedLightweight(
+	const FString& TFID, TSubclassOf<AFGBuildable> BuildableClass,
+	const FTransform& Transform, const TSet<int32>& IndicesBefore)
+{
+	AFGLightweightBuildableSubsystem* Sub = AFGLightweightBuildableSubsystem::Get(GetWorld());
+	if (!Sub || !BuildableClass)
+	{
+		return EAdoptResult::NotFound;
+	}
+	const TArray<FRuntimeBuildableInstanceData>* Instances =
+		Sub->GetAllLightweightBuildableInstances().Find(BuildableClass);
+	if (!Instances)
+	{
+		return EAdoptResult::NotFound;
+	}
+
+	// Ours is the index that became live since the snapshot. This is exact -
+	// unlike matching by position, it stays correct when something else
+	// already sits at the same coordinates.
+	int32 Ours = INDEX_NONE;
+	for (int32 Index = 0; Index < Instances->Num(); ++Index)
+	{
+		if (!(*Instances)[Index].IsValidOnLoad() || IndicesBefore.Contains(Index))
+		{
+			continue;
+		}
+		if (Ours != INDEX_NONE)
+		{
+			// Two appeared; something else spawned concurrently and we can no
+			// longer tell which is ours. Adopt neither rather than guess.
+			return EAdoptResult::NotFound;
+		}
+		Ours = Index;
+	}
+	if (Ours == INDEX_NONE)
+	{
+		return EAdoptResult::NotFound;
+	}
+
+	// Reject co-location: two instances at one position are indistinguishable
+	// on reload (identity is class + location there, since indices are not
+	// stable), which strands BOTH. Remove the one this spawn created so a
+	// rejected request leaves the world exactly as it found it.
+	const FVector Location = Transform.GetLocation();
+	for (int32 Index = 0; Index < Instances->Num(); ++Index)
+	{
+		if (Index == Ours || !(*Instances)[Index].IsValidOnLoad())
+		{
+			continue;
+		}
+		if ((*Instances)[Index].Transform.GetLocation().Equals(Location, LocationToleranceCm))
+		{
+			Sub->RemoveByInstanceIndex(BuildableClass, Ours);
+			return EAdoptResult::Occupied;
+		}
+	}
+
 	FSTFLightweightRecord Record;
 	Record.BuildableClass = BuildableClass;
-	Record.Transform = Transform;
-	// Same resolve used across session boundaries: find the live instance
-	// of this class within 1cm and point RuntimeRef at it.
-	if (!RevalidateLightweightRecord(Record))
-	{
-		return false;
-	}
+	// Store the instance's own transform, not the requested one: that is what
+	// a later reload will compare against, so it round-trips exactly.
+	Record.Transform = (*Instances)[Ours].Transform;
+	Record.RuntimeIndexHint = Ours;
+	Record.RuntimeRef.Initialize(Sub, BuildableClass, Ours);
 	LightweightBuildables.Add(TFID, MoveTemp(Record));
-	return true;
+	return EAdoptResult::Adopted;
 }
 
 void ASTFRegistrySubsystem::Unregister(const FString& TFID)
