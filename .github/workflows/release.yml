@@ -23,6 +23,14 @@
 #     only the GitHub Release is created.
 #   - Repo secret     SMR_API_KEY  = a ficsit.app API key with upload rights
 #     (ficsit.app → your profile → API keys).
+#
+# Two ficsit-cli details worth knowing before the first upload (verified
+# against its published docs for `ficsit smr upload`):
+#   - It supports `--dry-run`, so the upload path can be exercised for real
+#     once SMR_API_KEY exists, without publishing anything.
+#   - `--stability` defaults to `release`. For an early version consider
+#     passing `--stability alpha` (or `beta`) instead, so the listing does not
+#     advertise a 0.x build as production-ready.
 
 name: release
 
@@ -51,6 +59,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          # On workflow_dispatch this must be the tag being (re)published, not
+          # the default branch - otherwise the commit-match check below tests
+          # the wrong commit entirely.
+          ref: ${{ github.event.inputs.tag || github.ref }}
 
       - name: Resolve tag and version
         id: v
@@ -63,14 +76,22 @@ jobs:
           echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
           echo "Releasing tag $TAG (version ${TAG#v})"
 
-      - name: Download packaged mod from the latest successful mod-build
+      - name: Download the packaged mod built from this exact commit
         shell: bash
         run: |
           set -euo pipefail
-          RUN_ID=$(gh run list --workflow mod-build.yml --status success \
-            --limit 1 --json databaseId --jq '.[0].databaseId')
+          # Must be a build OF THE TAGGED COMMIT. Taking "the latest
+          # successful run" ships whatever happened to build last, which is
+          # routinely a different commit: most changes (docs, CI, skills) do
+          # not touch Source/** and so never trigger mod-build. That would
+          # publish a binary whose contents do not match the version on the
+          # tin - verified on 2026-08-27, when the newest successful build was
+          # three commits behind main.
+          SHA=$(git rev-parse HEAD)
+          echo "Tagged commit: $SHA"
+          RUN_ID=$(gh run list --workflow mod-build.yml --status success --limit 50 --json databaseId,headSha --jq "[.[] | select(.headSha == \"$SHA\")][0].databaseId // empty")
           if [ -z "$RUN_ID" ]; then
-            echo "::error::No successful mod-build run found. Run mod-build on the release commit first (see this workflow's header)."
+            echo "::error::No successful mod-build for commit $SHA. A release must ship a build of the tagged commit, and mod-build only runs when Source/**, *.uplugin or its own workflow change - so a docs-only release commit never gets one. Fix: Actions -> mod-build -> Run workflow against this commit, wait for green, then re-run this release via workflow_dispatch."
             exit 1
           fi
           echo "Using mod-build run $RUN_ID"
