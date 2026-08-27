@@ -75,6 +75,7 @@ private:
 	// Route handlers.
 	bool HandleHealth(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete);
 	bool HandleWorld(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete);
+	bool HandleBuildableClass(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete);
 	bool HandleBuildables(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete);
 	bool HandleBuildableByID(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete);
 	bool HandleConnections(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete);
