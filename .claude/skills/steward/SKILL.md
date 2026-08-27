@@ -7,13 +7,25 @@ description: Repo-specific guidance for driving PRs and CI on SatisfactoryTerraf
 
 ## Which checks matter
 
-- **mod-build** (self-hosted Windows runner) builds
-  and packages the UE mod - it is this repo's only CI and its merge gate.
-  Never leave it red silently: diagnose from job logs and either fix the
-  workflow or report exactly what the owner must do (secrets, runner state).
+- **pr-check / `validate`** (hosted) is the required check on `main`. It runs
+  on pull requests and validates what can be checked without the engine: the
+  `.uplugin` parses and its module name matches `Source/<Name>/<Name>.Build.cs`,
+  C++ sources are UTF-8, and - deliberately - that `mod-build.yml` has not
+  gained a `pull_request` trigger. That last one enforces the runner-safety
+  rule mechanically instead of trusting a comment.
+- **mod-build** (self-hosted Windows runner) is the real verification that the
+  mod compiles and packages. It **cannot** run on a PR (see Hard rules), so it
+  is not the required check - but a PR whose branch matches `claude/**` gets a
+  real compile anyway, because the push trigger fires and status attaches to
+  the commit. **Use `claude/**` branches**: it is the only way to get both a
+  compile and a mergeable PR. Never leave it red silently.
 - The Terraform provider and its hosted `provider-ci` live in
   [terraform-provider-satisfactory](https://github.com/daroco/terraform-provider-satisfactory);
   contract changes land there first (spec/types/mock/client), then here.
+- **Green CI is not evidence the change works.** Nothing here executes the
+  mod. Anything touching spawning, the registry, lightweight buildables, or
+  dismantle needs a live pass - see the `live-verify` skill, and expect to ask
+  the user to look at something.
 
 ## mod-build failure triage
 
@@ -49,6 +61,9 @@ Read the failing step first; the workflow fails fast with explicit messages.
   need them.
 - Don't "fix" a red mod-build by deleting its checks or making steps
   non-fatal; the fail-fast preflight exists so failures are diagnosable.
+- Don't bypass branch protection because a required check is inconvenient.
+  It was ceremonial for a while - requiring a check that could never run on a
+  PR - and the fix was to make it satisfiable, not to route around it.
 
 ## Conventions recap
 
