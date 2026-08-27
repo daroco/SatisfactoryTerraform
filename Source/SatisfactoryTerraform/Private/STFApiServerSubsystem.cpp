@@ -877,6 +877,12 @@ TSharedPtr<FJsonObject> ASTFApiServerSubsystem::SpawnBuildable(const TSharedPtr<
 
 	// Spawn through the buildable subsystem so the buildable ticks in the
 	// factory tick group like a hologram-built one would.
+	// Capture which lightweight instances of this class exist BEFORE spawning.
+	// If the game converts this buildable during FinishSpawning below, the one
+	// index that appears is unambiguously ours - which matters when something
+	// already occupies the target position (see AdoptSpawnedLightweight).
+	const TSet<int32> LightweightIndicesBefore = Registry->SnapshotLiveIndices(Class);
+
 	AFGBuildableSubsystem* BuildableSubsystem = AFGBuildableSubsystem::Get(GetWorld());
 	AFGBuildable* Buildable = BuildableSubsystem->BeginSpawnBuildable(Class, Transform);
 	if (!Buildable)
@@ -920,15 +926,27 @@ TSharedPtr<FJsonObject> ASTFApiServerSubsystem::SpawnBuildable(const TSharedPtr<
 	// game's own instance, re-found by class + location.
 	if (Buildable->IsActorBeingDestroyed() || Buildable->ManagedByLightweightBuildableSubsystem())
 	{
-		if (Registry->RegisterLightweightByIdentity(TFID, Class, Transform))
+		const ASTFRegistrySubsystem::EAdoptResult Adopted =
+			Registry->AdoptSpawnedLightweight(TFID, Class, Transform, LightweightIndicesBefore);
+		if (Adopted == ASTFRegistrySubsystem::EAdoptResult::Adopted)
 		{
 			UE_LOG(LogSatisfactoryTerraform, Log, TEXT("Spawned %s as %s (lightweight)"), *Class->GetName(), *TFID);
 			OutStatus = 201;
 			return LightweightToJson(TFID, *Registry->FindLightweight(TFID));
 		}
+		if (Adopted == ASTFRegistrySubsystem::EAdoptResult::Occupied)
+		{
+			// Something is already there. AdoptSpawnedLightweight has already
+			// removed the instance this request created, so the world is
+			// unchanged. Refusing matters: two instances at one position are
+			// indistinguishable on reload and strand each other permanently.
+			OutStatus = 409;
+			OutError = TEXT("a buildable of that class already exists at that position");
+			return nullptr;
+		}
 		if (Buildable->IsActorBeingDestroyed())
 		{
-			// Converted but we couldn't find the instance - should not
+			// Converted but we couldn't identify the instance - should not
 			// happen (the add is synchronous); fail loudly rather than
 			// registering a dead actor pointer.
 			OutStatus = 500;

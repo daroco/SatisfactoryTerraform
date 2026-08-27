@@ -95,12 +95,27 @@ public:
 	void Register(const FString& TFID, AFGBuildable* Buildable);
 	void RegisterLightweight(const FString& TFID, const FLightweightBuildableInstanceRef& Ref);
 
-	/** Register a lightweight-tracked buildable from identity alone (class +
-	  * transform), resolving the engine ref by scanning the lightweight
-	  * subsystem for the live instance of that class within 1cm - used after
-	  * the game itself converts a freshly spawned buildable inside BeginPlay
-	  * (see SpawnBuildable). Returns false if no such instance exists. */
-	bool RegisterLightweightByIdentity(const FString& TFID, TSubclassOf<AFGBuildable> BuildableClass, const FTransform& Transform);
+	/** Live instance indices for BuildableClass, captured before a spawn so
+	  * AdoptSpawnedLightweight can tell which instance the spawn created.
+	  * Empty is normal (first buildable of that class this session). */
+	TSet<int32> SnapshotLiveIndices(TSubclassOf<AFGBuildable> BuildableClass) const;
+
+	/** Take ownership of the lightweight instance a spawn just created.
+	  *
+	  * The game converts eligible buildables synchronously inside
+	  * FinishSpawning, so by the time this runs the instance already exists.
+	  * It is identified by diffing against IndicesBefore rather than by
+	  * position: position cannot distinguish co-located instances, and
+	  * guessing there once cost 27 real foundations (see the README).
+	  *
+	  * Occupied means another live instance already sits at Transform. The
+	  * instance this spawn created is removed before returning, so a rejected
+	  * request leaves nothing behind - without that, the leaked instance is
+	  * untracked forever AND makes the existing buildable at that position
+	  * permanently unresolvable (both fail closed on the ambiguity). */
+	enum class EAdoptResult : uint8 { Adopted, Occupied, NotFound };
+	EAdoptResult AdoptSpawnedLightweight(const FString& TFID, TSubclassOf<AFGBuildable> BuildableClass,
+		const FTransform& Transform, const TSet<int32>& IndicesBefore);
 
 	void Unregister(const FString& TFID);
 
