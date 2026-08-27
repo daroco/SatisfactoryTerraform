@@ -13,6 +13,7 @@
 #include "FGBuildableSubsystem.h"
 #include "FGRecipe.h"
 #include "FGDismantleInterface.h"
+#include "FGClearanceData.h" // FFGClearanceData / EClearanceType
 #include "FGFactoryConnectionComponent.h"
 #include "FGPowerConnectionComponent.h"
 #include "Tests/FGBuildableSpawnStrategy_Spline.h"
@@ -145,6 +146,18 @@ namespace
 		return Connectors.IsValidIndex(Index) ? Connectors[Index] : nullptr;
 	}
 
+	/** Wire spelling for EClearanceType - snake_case to match the rest of the
+	  * API, and stable regardless of how the enum is displayed in-editor. */
+	const TCHAR* ClearanceTypeName(EClearanceType Type)
+	{
+		switch (Type)
+		{
+		case EClearanceType::CT_Soft:            return TEXT("soft");
+		case EClearanceType::CT_BlockEverything: return TEXT("block_everything");
+		default:                                 return TEXT("default");
+		}
+	}
+
 	TSharedPtr<FJsonObject> ConnectionToJson(const FString& TFID, const FString& ClassName, const FSTFConnectionEndpoints& Endpoints)
 	{
 		const TSharedPtr<FJsonObject> Json = MakeShared<FJsonObject>();
@@ -273,6 +286,7 @@ void ASTFApiServerSubsystem::BindRoutesOnce()
 
 	Bind(TEXT("/api/v1/health"), EHttpServerRequestVerbs::VERB_GET, &ASTFApiServerSubsystem::HandleHealth);
 	Bind(TEXT("/api/v1/world"), EHttpServerRequestVerbs::VERB_GET, &ASTFApiServerSubsystem::HandleWorld);
+	Bind(TEXT("/api/v1/classes/:class"), EHttpServerRequestVerbs::VERB_GET, &ASTFApiServerSubsystem::HandleBuildableClass);
 	Bind(TEXT("/api/v1/buildables"),
 		EHttpServerRequestVerbs::VERB_GET | EHttpServerRequestVerbs::VERB_POST,
 		&ASTFApiServerSubsystem::HandleBuildables);
@@ -414,6 +428,88 @@ bool ASTFApiServerSubsystem::HandleWorld(const FHttpServerRequest& Request, cons
 	Body->SetStringField(TEXT("session_name"), GetWorld()->GetMapName());
 	Body->SetStringField(TEXT("game_version"), TEXT("")); // TODO(M1): FEngineVersion / FG changelist
 	Body->SetStringField(TEXT("mod_version"), TEXT("0.1.0"));
+	OnComplete(JsonResponse(200, Body));
+	return true;
+}
+
+bool ASTFApiServerSubsystem::HandleBuildableClass(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete)
+{
+	if (!CheckRequest(Request, OnComplete))
+	{
+		return true;
+	}
+
+	const FString ClassName = Request.PathParams.FindRef(TEXT("class"));
+	FString Error;
+	UClass* Class = ResolveBuildableClass(ClassName, Error);
+	if (!Class)
+	{
+		OnComplete(ErrorResponse(404, FString::Printf(TEXT("no buildable class named %s"), *ClassName)));
+		return true;
+	}
+
+	// Read the class default object. Clearance is authored per class
+	// (mClearanceData is EditDefaultsOnly), so this needs nothing spawned and
+	// touches no world state - which is what makes the endpoint safe to call
+	// during a Terraform plan. GetClearanceData_Implementation is public and,
+	// unusually for this codebase, has a real body in the available source
+	// (it appends mClearanceData), so calling it on a CDO is well understood
+	// rather than assumed.
+	const AFGBuildable* CDO = Class->GetDefaultObject<AFGBuildable>();
+	TArray<FFGClearanceData> ClearanceData;
+	if (CDO)
+	{
+		CDO->GetClearanceData_Implementation(ClearanceData);
+	}
+
+	const TSharedPtr<FJsonObject> Body = MakeShared<FJsonObject>();
+	Body->SetStringField(TEXT("class"), Class->GetName());
+
+	const auto VecJson = [](const FVector& V)
+	{
+		const TSharedPtr<FJsonObject> Out = MakeShared<FJsonObject>();
+		Out->SetNumberField(TEXT("x"), V.X);
+		Out->SetNumberField(TEXT("y"), V.Y);
+		Out->SetNumberField(TEXT("z"), V.Z);
+		return Out;
+	};
+
+	TArray<TSharedPtr<FJsonValue>> Boxes;
+	FBox Union(ForceInit);
+	bool bAnyValid = false;
+	for (const FFGClearanceData& Entry : ClearanceData)
+	{
+		if (!Entry.IsValid())
+		{
+			continue; // a declared-but-empty box reserves nothing
+		}
+		// Fold in the relative transform so callers get boxes in the
+		// buildable's own frame and never have to know about it.
+		const FBox Box = Entry.GetTransformedClearanceBox();
+
+		const TSharedPtr<FJsonObject> BoxJson = MakeShared<FJsonObject>();
+		BoxJson->SetStringField(TEXT("type"), ClearanceTypeName(Entry.Type));
+		BoxJson->SetObjectField(TEXT("min"), VecJson(Box.Min));
+		BoxJson->SetObjectField(TEXT("max"), VecJson(Box.Max));
+		Boxes.Add(MakeShared<FJsonValueObject>(BoxJson));
+
+		Union = bAnyValid ? Union + Box : Box;
+		bAnyValid = true;
+	}
+	Body->SetArrayField(TEXT("clearance"), Boxes);
+
+	// Omit bounds entirely when nothing was declared. Reporting a zero box
+	// would read as "needs no room" and quietly stack buildables; absent makes
+	// a caller that depends on a size fail loudly instead.
+	if (bAnyValid)
+	{
+		const TSharedPtr<FJsonObject> Bounds = MakeShared<FJsonObject>();
+		Bounds->SetObjectField(TEXT("min"), VecJson(Union.Min));
+		Bounds->SetObjectField(TEXT("max"), VecJson(Union.Max));
+		Bounds->SetObjectField(TEXT("size"), VecJson(Union.GetSize()));
+		Body->SetObjectField(TEXT("bounds"), Bounds);
+	}
+
 	OnComplete(JsonResponse(200, Body));
 	return true;
 }
