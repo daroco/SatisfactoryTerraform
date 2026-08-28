@@ -10,6 +10,41 @@ is a different implementation, and every serious bug in this project's history
 was invisible until a real game ran the real code. Budget a live pass for
 anything touching spawn, the registry, or dismantle.
 
+## Compile before you push (12 seconds, not 22 minutes)
+
+The self-hosted runner is the same machine you are working on, so the engine
+and a working project tree are already here. Compiling directly is a
+pre-flight check, not a replacement for CI: **CI still builds, packages,
+produces the artifact, logs the run, and gates the merge.** This only answers
+"does this even compile" - which a 22-minute round trip is a terrible way to
+ask.
+
+Measured on this runner: a cold build is ~12 minutes; rebuilding after a
+one-line `.cpp` edit is **~12 seconds**.
+
+```sh
+# 1. NEVER build while CI is building - you would fight over the same
+#    intermediate files. This must print 0:
+powershell -NoProfile -Command "(Get-Process | Where-Object { $_.ProcessName -match 'UnrealBuildTool|^cl$|Runner.Worker' } | Measure-Object).Count"
+
+# 2. Stage your working copy into the project tree
+cp -r Source SatisfactoryTerraform.uplugin \
+  /d/w/SatisfactoryTerraform/SatisfactoryTerraform/SML/Mods/SatisfactoryTerraform/
+
+# 3. Compile (FactoryEditor Win64 Development against the SML uproject)
+powershell -NoProfile -Command "& 'C:\CI\UE\Engine\Build\BatchFiles\Build.bat' FactoryEditor Win64 Development -project='D:\w\SatisfactoryTerraform\SatisfactoryTerraform\SML\FactoryGame.uproject'"
+```
+
+Notes:
+
+- Only your own pushes start CI builds, so you control the collision window -
+  but check anyway, and do not push while a local build is running.
+- Corrupting the tree costs a slow build, nothing more: the next CI run
+  re-checks-out and repairs it.
+- This compiles the Development editor. Packaging builds Shipping, a separate
+  set of objects, so a clean local compile does not prove packaging works -
+  one more reason CI stays the gate.
+
 ## The gotcha that matters most
 
 **A leaked lightweight instance is invisible to the API.** The registry lists
