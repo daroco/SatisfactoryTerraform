@@ -36,6 +36,8 @@
 
 #include "FGLightweightBuildableSubsystem.h"
 
+#include "GameFramework/PlayerState.h" // GetPlayerName() - forward-declared via PlayerController
+
 namespace
 {
 	TUniquePtr<FHttpServerResponse> JsonResponse(int32 Code, const TSharedPtr<FJsonObject>& Body)
@@ -321,6 +323,8 @@ void ASTFApiServerSubsystem::BindRoutesOnce()
 
 	Bind(TEXT("/api/v1/health"), EHttpServerRequestVerbs::VERB_GET, &ASTFApiServerSubsystem::HandleHealth);
 	Bind(TEXT("/api/v1/world"), EHttpServerRequestVerbs::VERB_GET, &ASTFApiServerSubsystem::HandleWorld);
+	Bind(TEXT("/api/v1/players"), EHttpServerRequestVerbs::VERB_GET, &ASTFApiServerSubsystem::HandlePlayers);
+	Bind(TEXT("/api/v1/world/buildables"), EHttpServerRequestVerbs::VERB_GET, &ASTFApiServerSubsystem::HandleWorldBuildables);
 	Bind(TEXT("/api/v1/classes/:class"), EHttpServerRequestVerbs::VERB_GET, &ASTFApiServerSubsystem::HandleBuildableClass);
 	Bind(TEXT("/api/v1/buildables"),
 		EHttpServerRequestVerbs::VERB_GET | EHttpServerRequestVerbs::VERB_POST,
@@ -546,6 +550,185 @@ bool ASTFApiServerSubsystem::HandleBuildableClass(const FHttpServerRequest& Requ
 	}
 
 	OnComplete(JsonResponse(200, Body));
+	return true;
+}
+
+bool ASTFApiServerSubsystem::HandlePlayers(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete)
+{
+	if (!CheckRequest(Request, OnComplete))
+	{
+		return true;
+	}
+
+	// Plain engine API on purpose. FactoryGame offers GetLocalPlayerController
+	// and AFGPlayerController::GetPawnLocation, but both are stub-only in the
+	// available source; the controller iterator is real engine code we can
+	// read, and works the same on a listen or dedicated server.
+	TArray<TSharedPtr<FJsonValue>> Players;
+	for (FConstPlayerControllerIterator It = GetWorld()->GetPlayerControllerIterator(); It; ++It)
+	{
+		const APlayerController* PC = It->Get();
+		if (!PC)
+		{
+			continue;
+		}
+		const APawn* Pawn = PC->GetPawn();
+		if (!Pawn)
+		{
+			continue; // connected but not spawned in yet
+		}
+		const TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+		if (const APlayerState* State = PC->PlayerState)
+		{
+			Entry->SetStringField(TEXT("name"), State->GetPlayerName());
+		}
+		const FVector Loc = Pawn->GetActorLocation();
+		const TSharedPtr<FJsonObject> Location = MakeShared<FJsonObject>();
+		Location->SetNumberField(TEXT("x"), Loc.X);
+		Location->SetNumberField(TEXT("y"), Loc.Y);
+		Location->SetNumberField(TEXT("z"), Loc.Z);
+		Entry->SetObjectField(TEXT("location"), Location);
+		Entry->SetNumberField(TEXT("yaw"), Pawn->GetActorRotation().Yaw);
+		Players.Add(MakeShared<FJsonValueObject>(Entry));
+	}
+
+	FString Out;
+	const auto Writer = TJsonWriterFactory<>::Create(&Out);
+	FJsonSerializer::Serialize(Players, Writer);
+	auto Response = FHttpServerResponse::Create(Out, TEXT("application/json"));
+	Response->Code = EHttpServerResponseCodes::Ok;
+	OnComplete(MoveTemp(Response));
+	return true;
+}
+
+bool ASTFApiServerSubsystem::HandleWorldBuildables(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete)
+{
+	if (!CheckRequest(Request, OnComplete))
+	{
+		return true;
+	}
+
+	// A spatial filter is mandatory, not a convenience: a mature save holds
+	// tens of thousands of buildables and serialising all of them would be
+	// unusable. Callers say where and how far.
+	double CenterX = 0, CenterY = 0, CenterZ = 0, Radius = 0;
+	const auto Param = [&Request](const TCHAR* Key, double& Out)
+	{
+		if (const FString* Raw = Request.QueryParams.Find(Key))
+		{
+			Out = FCString::Atod(**Raw);
+			return true;
+		}
+		return false;
+	};
+	if (!Param(TEXT("x"), CenterX) || !Param(TEXT("y"), CenterY) || !Param(TEXT("z"), CenterZ) || !Param(TEXT("radius"), Radius))
+	{
+		OnComplete(ErrorResponse(422, TEXT("x, y, z and radius query parameters are all required")));
+		return true;
+	}
+	if (Radius <= 0 || Radius > 100000)
+	{
+		OnComplete(ErrorResponse(422, TEXT("radius must be between 0 and 100000 centimetres")));
+		return true;
+	}
+	const FVector Center(CenterX, CenterY, CenterZ);
+	const double RadiusSq = Radius * Radius;
+
+	// tf_id lookup, so the response can say which of these Terraform already
+	// manages - an exporter needs to know what it would be duplicating.
+	ASTFRegistrySubsystem* Registry = ASTFRegistrySubsystem::Get(GetWorld());
+	TMap<FString, FString> ActorKeyToTFID;   // actor path name -> tf_id
+	TMap<FString, FString> LocationKeyToTFID; // rounded location -> tf_id
+	const auto LocationKey = [](const FVector& V)
+	{
+		return FString::Printf(TEXT("%.0f,%.0f,%.0f"), V.X, V.Y, V.Z);
+	};
+	for (const ASTFRegistrySubsystem::FEntry& Entry : Registry->GetAll())
+	{
+		if (Entry.IsLightweight())
+		{
+			LocationKeyToTFID.Add(LocationKey(Entry.LightweightRef.GetBuildableTransform().GetLocation()), Entry.TFID);
+		}
+		else if (Entry.Buildable)
+		{
+			ActorKeyToTFID.Add(Entry.Buildable->GetPathName(), Entry.TFID);
+		}
+	}
+
+	TArray<TSharedPtr<FJsonValue>> Items;
+	const auto AddItem = [&](UClass* Class, const FTransform& Transform, const AFGBuildable* Actor, bool bLightweight, const FString& TFID)
+	{
+		const TSharedPtr<FJsonObject> Json = MakeShared<FJsonObject>();
+		Json->SetNumberField(TEXT("index"), Items.Num());
+		if (!TFID.IsEmpty())
+		{
+			Json->SetStringField(TEXT("tf_id"), TFID);
+		}
+		Json->SetStringField(TEXT("class"), Class->GetName());
+		Json->SetBoolField(TEXT("lightweight"), bLightweight);
+		const FVector Loc = Transform.GetLocation();
+		const TSharedPtr<FJsonObject> T = MakeShared<FJsonObject>();
+		T->SetNumberField(TEXT("x"), Loc.X);
+		T->SetNumberField(TEXT("y"), Loc.Y);
+		T->SetNumberField(TEXT("z"), Loc.Z);
+		T->SetNumberField(TEXT("yaw"), Transform.Rotator().Yaw);
+		Json->SetObjectField(TEXT("transform"), T);
+		if (const AFGBuildableManufacturer* Manufacturer = Cast<AFGBuildableManufacturer>(Actor))
+		{
+			if (const TSubclassOf<UFGRecipe> Recipe = Manufacturer->GetCurrentRecipe())
+			{
+				Json->SetStringField(TEXT("recipe"), Recipe->GetName());
+			}
+			Json->SetNumberField(TEXT("clock_speed"), Manufacturer->GetPendingPotential());
+		}
+		Items.Add(MakeShared<FJsonValueObject>(Json));
+	};
+
+	// Actors. GetAllBuildablesRef is a header-inline accessor over the
+	// subsystem's own list, so this does not walk the whole world.
+	if (AFGBuildableSubsystem* BuildableSubsystem = AFGBuildableSubsystem::Get(GetWorld()))
+	{
+		for (AFGBuildable* Buildable : BuildableSubsystem->GetAllBuildablesRef())
+		{
+			if (!IsValid(Buildable) || FVector::DistSquared(Buildable->GetActorLocation(), Center) > RadiusSq)
+			{
+				continue;
+			}
+			AddItem(Buildable->GetClass(), Buildable->GetActorTransform(), Buildable, false,
+				ActorKeyToTFID.FindRef(Buildable->GetPathName()));
+		}
+	}
+
+	// Lightweight instances are NOT actors and never appear in the list above -
+	// foundations and walls live only here, so an export that skipped this
+	// would silently omit every floor.
+	if (AFGLightweightBuildableSubsystem* LightweightSubsystem = AFGLightweightBuildableSubsystem::Get(GetWorld()))
+	{
+		for (const auto& Pair : LightweightSubsystem->GetAllLightweightBuildableInstances())
+		{
+			UClass* Class = Pair.Key.Get();
+			if (!Class)
+			{
+				continue;
+			}
+			for (const FRuntimeBuildableInstanceData& Data : Pair.Value)
+			{
+				if (!Data.IsValidOnLoad() || FVector::DistSquared(Data.Transform.GetLocation(), Center) > RadiusSq)
+				{
+					continue;
+				}
+				AddItem(Class, Data.Transform, nullptr, true,
+					LocationKeyToTFID.FindRef(LocationKey(Data.Transform.GetLocation())));
+			}
+		}
+	}
+
+	FString Out;
+	const auto Writer = TJsonWriterFactory<>::Create(&Out);
+	FJsonSerializer::Serialize(Items, Writer);
+	auto Response = FHttpServerResponse::Create(Out, TEXT("application/json"));
+	Response->Code = EHttpServerResponseCodes::Ok;
+	OnComplete(MoveTemp(Response));
 	return true;
 }
 

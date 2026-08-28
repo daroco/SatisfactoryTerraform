@@ -76,6 +76,8 @@ private:
 	bool HandleHealth(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete);
 	bool HandleWorld(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete);
 	bool HandleBuildableClass(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete);
+	bool HandlePlayers(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete);
+	bool HandleWorldBuildables(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete);
 	bool HandleBuildables(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete);
 	bool HandleBuildableByID(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete);
 	bool HandleConnections(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete);
