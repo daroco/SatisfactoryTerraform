@@ -637,52 +637,40 @@ bool ASTFApiServerSubsystem::HandleWorldBuildables(const FHttpServerRequest& Req
 	// tf_id lookup, so the response can say which of these Terraform already
 	// manages - an exporter needs to know what it would be duplicating.
 	ASTFRegistrySubsystem* Registry = ASTFRegistrySubsystem::Get(GetWorld());
-	TMap<FString, FString> ActorKeyToTFID;   // actor path name -> tf_id
+	TMap<FString, FString> ActorKeyToTFID;    // actor path name -> tf_id
 	TMap<FString, FString> LocationKeyToTFID; // rounded location -> tf_id
 	const auto LocationKey = [](const FVector& V)
 	{
 		return FString::Printf(TEXT("%.0f,%.0f,%.0f"), V.X, V.Y, V.Z);
 	};
-	for (const ASTFRegistrySubsystem::FEntry& Entry : Registry->GetAll())
+	if (Registry)
 	{
-		if (Entry.IsLightweight())
+		for (const ASTFRegistrySubsystem::FEntry& Entry : Registry->GetAll())
 		{
-			LocationKeyToTFID.Add(LocationKey(Entry.LightweightRef.GetBuildableTransform().GetLocation()), Entry.TFID);
-		}
-		else if (Entry.Buildable)
-		{
-			ActorKeyToTFID.Add(Entry.Buildable->GetPathName(), Entry.TFID);
+			if (Entry.IsLightweight())
+			{
+				LocationKeyToTFID.Add(LocationKey(Entry.LightweightRef.GetBuildableTransform().GetLocation()), Entry.TFID);
+			}
+			else if (Entry.Buildable)
+			{
+				ActorKeyToTFID.Add(Entry.Buildable->GetPathName(), Entry.TFID);
+			}
 		}
 	}
 
-	TArray<TSharedPtr<FJsonValue>> Items;
-	const auto AddItem = [&](UClass* Class, const FTransform& Transform, const AFGBuildable* Actor, bool bLightweight, const FString& TFID)
+	// Collected first, serialised second: a belt reports the two buildables it
+	// joins by their index in this response, and the far end is often gathered
+	// after the belt itself.
+	struct FWorldItem
 	{
-		const TSharedPtr<FJsonObject> Json = MakeShared<FJsonObject>();
-		Json->SetNumberField(TEXT("index"), Items.Num());
-		if (!TFID.IsEmpty())
-		{
-			Json->SetStringField(TEXT("tf_id"), TFID);
-		}
-		Json->SetStringField(TEXT("class"), Class->GetName());
-		Json->SetBoolField(TEXT("lightweight"), bLightweight);
-		const FVector Loc = Transform.GetLocation();
-		const TSharedPtr<FJsonObject> T = MakeShared<FJsonObject>();
-		T->SetNumberField(TEXT("x"), Loc.X);
-		T->SetNumberField(TEXT("y"), Loc.Y);
-		T->SetNumberField(TEXT("z"), Loc.Z);
-		T->SetNumberField(TEXT("yaw"), Transform.Rotator().Yaw);
-		Json->SetObjectField(TEXT("transform"), T);
-		if (const AFGBuildableManufacturer* Manufacturer = Cast<AFGBuildableManufacturer>(Actor))
-		{
-			if (const TSubclassOf<UFGRecipe> Recipe = Manufacturer->GetCurrentRecipe())
-			{
-				Json->SetStringField(TEXT("recipe"), Recipe->GetName());
-			}
-			Json->SetNumberField(TEXT("clock_speed"), Manufacturer->GetPendingPotential());
-		}
-		Items.Add(MakeShared<FJsonValueObject>(Json));
+		UClass* Class = nullptr;
+		FTransform Transform;
+		AFGBuildable* Actor = nullptr;
+		bool bLightweight = false;
+		FString TFID;
 	};
+	TArray<FWorldItem> Items;
+	TMap<const AFGBuildable*, int32> ActorToIndex;
 
 	// Actors. GetAllBuildablesRef is a header-inline accessor over the
 	// subsystem's own list, so this does not walk the whole world.
@@ -694,8 +682,9 @@ bool ASTFApiServerSubsystem::HandleWorldBuildables(const FHttpServerRequest& Req
 			{
 				continue;
 			}
-			AddItem(Buildable->GetClass(), Buildable->GetActorTransform(), Buildable, false,
-				ActorKeyToTFID.FindRef(Buildable->GetPathName()));
+			ActorToIndex.Add(Buildable, Items.Num());
+			Items.Add(FWorldItem{Buildable->GetClass(), Buildable->GetActorTransform(), Buildable, false,
+				ActorKeyToTFID.FindRef(Buildable->GetPathName())});
 		}
 	}
 
@@ -717,16 +706,120 @@ bool ASTFApiServerSubsystem::HandleWorldBuildables(const FHttpServerRequest& Req
 				{
 					continue;
 				}
-				AddItem(Class, Data.Transform, nullptr, true,
-					LocationKeyToTFID.FindRef(LocationKey(Data.Transform.GetLocation())));
+				Items.Add(FWorldItem{Class, Data.Transform, nullptr, true,
+					LocationKeyToTFID.FindRef(LocationKey(Data.Transform.GetLocation()))});
 			}
 		}
 	}
 
-	FString Out;
-	const auto Writer = TJsonWriterFactory<>::Create(&Out);
-	FJsonSerializer::Serialize(Items, Writer);
-	auto Response = FHttpServerResponse::Create(Out, TEXT("application/json"));
+	// Which buildable+connector a belt or wire actually attaches to. The
+	// connector index must be produced the same way SpawnConnection consumes
+	// it, or an exported belt would be re-created against the wrong port -
+	// hence the shared GetFactoryConnector/GetPowerConnector ordering.
+	const auto EndpointJson = [&ActorToIndex](const UActorComponent* Mating) -> TSharedPtr<FJsonObject>
+	{
+		if (!Mating)
+		{
+			return nullptr;
+		}
+		AFGBuildable* Owner = Cast<AFGBuildable>(Mating->GetOwner());
+		if (!Owner)
+		{
+			return nullptr;
+		}
+		const int32* Index = ActorToIndex.Find(Owner);
+		if (!Index)
+		{
+			return nullptr; // the other end is outside the exported radius
+		}
+
+		int32 Connector = INDEX_NONE;
+		if (const UFGFactoryConnectionComponent* Factory = Cast<UFGFactoryConnectionComponent>(Mating))
+		{
+			TInlineComponentArray<UFGFactoryConnectionComponent*> Connectors;
+			Owner->GetComponents(Connectors);
+			UFGFactoryConnectionComponent::SortComponentList(Connectors);
+			Connector = Connectors.IndexOfByKey(Factory);
+		}
+		else if (const UFGPowerConnectionComponent* Power = Cast<UFGPowerConnectionComponent>(Mating))
+		{
+			TInlineComponentArray<UFGPowerConnectionComponent*> Connectors;
+			Owner->GetComponents(Connectors);
+			Connector = Connectors.IndexOfByKey(Power);
+		}
+		if (Connector == INDEX_NONE)
+		{
+			// Reporting a guessed index would produce configuration that
+			// applies and wires the wrong port. Say nothing instead.
+			return nullptr;
+		}
+
+		const TSharedPtr<FJsonObject> Json = MakeShared<FJsonObject>();
+		Json->SetNumberField(TEXT("index"), *Index);
+		Json->SetNumberField(TEXT("connector"), Connector);
+		return Json;
+	};
+
+	TArray<TSharedPtr<FJsonValue>> Out;
+	for (int32 i = 0; i < Items.Num(); ++i)
+	{
+		const FWorldItem& It = Items[i];
+		const TSharedPtr<FJsonObject> Json = MakeShared<FJsonObject>();
+		Json->SetNumberField(TEXT("index"), i);
+		if (!It.TFID.IsEmpty())
+		{
+			Json->SetStringField(TEXT("tf_id"), It.TFID);
+		}
+		Json->SetStringField(TEXT("class"), It.Class->GetName());
+		Json->SetBoolField(TEXT("lightweight"), It.bLightweight);
+		const FVector Loc = It.Transform.GetLocation();
+		const TSharedPtr<FJsonObject> T = MakeShared<FJsonObject>();
+		T->SetNumberField(TEXT("x"), Loc.X);
+		T->SetNumberField(TEXT("y"), Loc.Y);
+		T->SetNumberField(TEXT("z"), Loc.Z);
+		T->SetNumberField(TEXT("yaw"), It.Transform.Rotator().Yaw);
+		Json->SetObjectField(TEXT("transform"), T);
+
+		if (const AFGBuildableManufacturer* Manufacturer = Cast<AFGBuildableManufacturer>(It.Actor))
+		{
+			if (const TSubclassOf<UFGRecipe> Recipe = Manufacturer->GetCurrentRecipe())
+			{
+				Json->SetStringField(TEXT("recipe"), Recipe->GetName());
+			}
+			Json->SetNumberField(TEXT("clock_speed"), Manufacturer->GetPendingPotential());
+		}
+
+		// A belt or wire is defined by what it joins, not by where it sits.
+		TSharedPtr<FJsonObject> From, To;
+		if (const AFGBuildableConveyorBase* Conveyor = Cast<AFGBuildableConveyorBase>(It.Actor))
+		{
+			// Connection0 is the belt's input, so it mates with the *output*
+			// connector of the buildable upstream - matching SpawnConnection.
+			const UFGFactoryConnectionComponent* In = Conveyor->GetConnection0();
+			const UFGFactoryConnectionComponent* OutC = Conveyor->GetConnection1();
+			From = EndpointJson(In ? In->GetConnection() : nullptr);
+			To = EndpointJson(OutC ? OutC->GetConnection() : nullptr);
+		}
+		else if (const AFGBuildableWire* Wire = Cast<AFGBuildableWire>(It.Actor))
+		{
+			From = EndpointJson(Wire->GetConnection(0));
+			To = EndpointJson(Wire->GetConnection(1));
+		}
+		if (From.IsValid() && To.IsValid())
+		{
+			const TSharedPtr<FJsonObject> Connects = MakeShared<FJsonObject>();
+			Connects->SetObjectField(TEXT("from"), From);
+			Connects->SetObjectField(TEXT("to"), To);
+			Json->SetObjectField(TEXT("connects"), Connects);
+		}
+
+		Out.Add(MakeShared<FJsonValueObject>(Json));
+	}
+
+	FString Body;
+	const auto Writer = TJsonWriterFactory<>::Create(&Body);
+	FJsonSerializer::Serialize(Out, Writer);
+	auto Response = FHttpServerResponse::Create(Body, TEXT("application/json"));
 	Response->Code = EHttpServerResponseCodes::Ok;
 	OnComplete(MoveTemp(Response));
 	return true;
