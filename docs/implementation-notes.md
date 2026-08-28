@@ -139,6 +139,51 @@ belt/wire hookup) and
 [FicsitRemoteMonitoring](https://github.com/porisius/FicsitRemoteMonitoring)
 (in-game web server patterns).
 
+## Exporting the world (`GET /world/buildables`, `GET /players`)
+
+These are the read-only endpoints an exporter uses to turn a hand-built
+factory back into configuration. Three things about them are not obvious.
+
+**Actor enumeration alone misses every floor.**
+`AFGBuildableSubsystem::GetAllBuildablesRef()` is the obvious accessor and it
+returns actors only. Foundations, walls and ramps are lightweight instances,
+which are *not* actors — the same split behind most of the bugs in this file.
+The handler therefore unions two sources: the buildable subsystem's actor list
+and `AFGLightweightBuildableSubsystem::GetAllLightweightBuildableInstances()`.
+An export written against the obvious accessor would have looked correct and
+silently omitted the entire floor of every factory.
+
+**The spatial filter is required, not optional.** A mature save holds tens of
+thousands of buildables. `x`, `y`, `z` and `radius` are all mandatory (422
+otherwise) and the radius is capped at 1 km. Making it optional would only
+move the discovery of that into a live game.
+
+**Connections force two passes.** A belt is defined by the two connectors it
+joins, not by where it sits. Each end is reported as an index *into the same
+response*, because an untracked buildable has no `tf_id` and no other stable
+handle. The far end of a belt is usually enumerated after the belt itself, so
+nothing can be serialised until everything in range has been collected — hence
+the `FWorldItem` gather pass followed by a separate serialise pass.
+
+Connector indices are produced through the same ordering `SpawnConnection`
+consumes them by (`UFGFactoryConnectionComponent::SortComponentList` for
+factory connectors, plain component order for power). If those two ever
+diverge, exports will re-apply against the wrong ports.
+
+Endpoint resolution fails closed. An end outside the radius, an owner that is
+not an `AFGBuildable`, or a connector that cannot be found in the owner's list
+all drop the whole `connects` object. The dangerous outcome is not a missing
+belt but a guessed one: a wrong connector index yields configuration that
+applies cleanly and wires the wrong port, which is only discovered by watching
+a factory quietly not run.
+
+**Players use the plain engine API.** `GetPlayerControllerIterator` and the
+pawn's transform, not FactoryGame's `GetLocalPlayerController` /
+`GetPawnLocation`. Those ship as stubs in the local headers — empty bodies —
+so their return values cannot be trusted. Same rule that picked `GetProducedIn`
+over `IsProducedIn` for recipe validation: prefer the function with a real
+body, and prefer engine code over game code when both would work.
+
 ## Placement offset
 
 A `satisfactory_building`/`satisfactory_foundation`'s `z` is where its own
