@@ -19,28 +19,35 @@ produces the artifact, logs the run, and gates the merge.** This only answers
 "does this even compile" - which a 22-minute round trip is a terrible way to
 ask.
 
-Measured on this runner: a cold build is ~12 minutes; rebuilding after a
+Measured on this machine: a cold build is ~12 minutes; rebuilding after a
 one-line `.cpp` edit is **~12 seconds**.
 
+**Build in `D:\ue\SML`, never in `D:\w\...`.** `D:\w` is the runner's own work
+folder (it holds `_actions`, `_temp`, `_tool`). Building there does not just
+risk a slow rebuild - staging your working copy into it while a run is in
+flight makes CI compile *your uncommitted edits* and fail somebody else's
+commit. That is not hypothetical: it red-lit a docs-only PR with a compile
+error from a source file that PR never touched, and cost a build cycle to
+work out. `D:\ue\SML` is a private copy of the same project (~23 GB) that
+shares only the engine at `C:\CI\UE`, which both sides only read.
+
 ```sh
-# 1. NEVER build while CI is building - you would fight over the same
-#    intermediate files. This must print 0:
-powershell -NoProfile -Command "(Get-Process | Where-Object { $_.ProcessName -match 'UnrealBuildTool|^cl$|Runner.Worker' } | Measure-Object).Count"
+# 1. Stage your working copy into the private project tree
+cp -r Source SatisfactoryTerraform.uplugin /d/ue/SML/Mods/SatisfactoryTerraform/
 
-# 2. Stage your working copy into the project tree
-cp -r Source SatisfactoryTerraform.uplugin \
-  /d/w/SatisfactoryTerraform/SatisfactoryTerraform/SML/Mods/SatisfactoryTerraform/
-
-# 3. Compile (FactoryEditor Win64 Development against the SML uproject)
-powershell -NoProfile -Command "& 'C:\CI\UE\Engine\Build\BatchFiles\Build.bat' FactoryEditor Win64 Development -project='D:\w\SatisfactoryTerraform\SatisfactoryTerraform\SML\FactoryGame.uproject'"
+# 2. Compile (FactoryEditor Win64 Development against the SML uproject)
+"/c/CI/UE/Engine/Build/BatchFiles/Build.bat" FactoryEditor Win64 Development \
+  -project="D:\ue\SML\FactoryGame.uproject"
 ```
 
 Notes:
 
-- Only your own pushes start CI builds, so you control the collision window -
-  but check anyway, and do not push while a local build is running.
-- Corrupting the tree costs a slow build, nothing more: the next CI run
-  re-checks-out and repairs it.
+- If `D:\ue\SML` is missing, recreate it from the runner's tree while no run is
+  active: `robocopy D:\w\SatisfactoryTerraform\SatisfactoryTerraform\SML D:\ue\SML /E /MT:16`
+  (robocopy exits 1 on success). It carries its own Wwise integration, so it
+  needs no credentials - but the first build after copying is cold.
+- Build.bat holds a machine-wide mutex, so a local build and a CI build
+  serialise rather than race. Correctness is safe; you may just wait.
 - This compiles the Development editor. Packaging builds Shipping, a separate
   set of objects, so a clean local compile does not prove packaging works -
   one more reason CI stays the gate.
