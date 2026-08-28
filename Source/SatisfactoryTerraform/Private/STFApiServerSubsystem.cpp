@@ -146,6 +146,41 @@ namespace
 		return Connectors.IsValidIndex(Index) ? Connectors[Index] : nullptr;
 	}
 
+	/** True when RecipeClass can actually be produced by BuildableClass.
+	  *
+	  * Recipes declare their producers in mProducedIn, and
+	  * UFGRecipe::GetProducedIn resolves that list. Deliberately NOT
+	  * UFGRecipe::IsProducedIn, which would be the obvious choice: it is
+	  * stub-only in the available source (`return bool();`), so if it ever
+	  * resolved to the stub it would reject every recipe. GetProducedIn has a
+	  * real body we can read, so its behaviour is known rather than assumed.
+	  *
+	  * Fails OPEN: a recipe that declares no producers at all is allowed
+	  * through. This is the opposite of how co-location is handled, and on
+	  * purpose - a wrong rejection here breaks a legitimate apply, while a
+	  * wrong acceptance only yields a machine that does not run. Fail closed
+	  * where the cost is corruption, open where the cost is inconvenience. */
+	bool RecipeFitsBuildable(UClass* RecipeClass, UClass* BuildableClass)
+	{
+		if (!RecipeClass || !BuildableClass)
+		{
+			return true;
+		}
+		const TArray<TSubclassOf<UObject>> Producers = UFGRecipe::GetProducedIn(RecipeClass);
+		if (Producers.Num() == 0)
+		{
+			return true; // nothing declared - cannot judge, so do not block
+		}
+		for (const TSubclassOf<UObject>& Producer : Producers)
+		{
+			if (Producer == BuildableClass)
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
 	/** Wire spelling for EClearanceType - snake_case to match the rest of the
 	  * API, and stable regardless of how the enum is displayed in-editor. */
 	const TCHAR* ClearanceTypeName(EClearanceType Type)
@@ -891,6 +926,14 @@ TSharedPtr<FJsonObject> ASTFApiServerSubsystem::PatchBuildable(AFGBuildable* Bui
 			OutStatus = 422;
 			return nullptr;
 		}
+		// Same check as the spawn path: PATCH reached the identical broken
+		// state (a smelter reporting a constructor recipe) before this.
+		if (!RecipeFitsBuildable(RecipeClass, Buildable->GetClass()))
+		{
+			OutStatus = 422;
+			OutError = FString::Printf(TEXT("%s cannot be produced in %s"), *RecipeClassName, *Buildable->GetClass()->GetName());
+			return nullptr;
+		}
 		Manufacturer->SetRecipe(RecipeClass);
 	}
 
@@ -944,6 +987,16 @@ TSharedPtr<FJsonObject> ASTFApiServerSubsystem::SpawnBuildable(const TSharedPtr<
 		if (!RecipeClass)
 		{
 			OutStatus = 422;
+			return nullptr;
+		}
+		// Confirmed live: the game accepts a recipe its machine cannot make
+		// (a constructor recipe on a smelter), and even displays it in the
+		// machine UI, so nothing downstream surfaces the mistake - the factory
+		// simply never produces, and Terraform reports zero drift on it.
+		if (!RecipeFitsBuildable(RecipeClass, Class))
+		{
+			OutStatus = 422;
+			OutError = FString::Printf(TEXT("%s cannot be produced in %s"), *RecipeClassName, *Class->GetName());
 			return nullptr;
 		}
 	}
