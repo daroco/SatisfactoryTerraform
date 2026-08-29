@@ -111,6 +111,10 @@ drift.
 - [x] Proper dismantle via `IFGDismantleInterface`, with a `Destroy()` fallback (M2)
 - [x] Lightweight-buildable tracking + session-boundary self-heal (M2)
 - [x] Belts & power lines (M3)
+- [x] Read-only export endpoints: `GET /players`, `GET /world/buildables`
+      (everything near a point, tracked or not, with the belt/wire connection
+      graph) - the data an exporter needs to turn a hand-built factory into
+      configuration
 
 See [`CHANGELOG.md`](CHANGELOG.md) for the release history.
 
