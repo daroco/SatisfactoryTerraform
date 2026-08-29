@@ -115,6 +115,8 @@ drift.
       (everything near a point, tracked or not, with the belt/wire connection
       graph) - the data an exporter needs to turn a hand-built factory into
       configuration
+- [ ] Fluid pipelines & hypertubes - implemented and compiling, **not yet
+      verified in a live session** (see implementation notes)
 
 See [`CHANGELOG.md`](CHANGELOG.md) for the release history.
 

@@ -139,6 +139,55 @@ belt/wire hookup) and
 [FicsitRemoteMonitoring](https://github.com/porisius/FicsitRemoteMonitoring)
 (in-game web server patterns).
 
+## Pipelines and hypertubes (unverified)
+
+Placed by `SpawnConnection` alongside belts and wires. Structurally they are
+belts: `AFGBuildablePipeBase` exposes `GetConnection0()/GetConnection1()` just
+as `AFGBuildableConveyorBase` does, both implement
+`IFGSplineBuildableInterface`, and both are routed here with
+`UFGBuildableSpawnStrategy_Spline`. The pipe is wired *into* the run - source
+connector to the pipe's connection0, pipe's connection1 to the destination -
+rather than joining the two machine connectors directly, for the same reason
+belts are (see the conveyor-attachment dismantle crash above).
+
+Two things differ.
+
+**Connector indices are per-kind.** Fluid connectors are
+`UFGPipeConnectionComponent`, hypertube connectors
+`UFGPipeConnectionComponentHyper`; both derive from
+`UFGPipeConnectionComponentBase` but are indexed as separate lists, chosen by
+the class being placed. Connector 0 of a machine's fluid connectors has nothing
+to do with connector 0 of its power connectors. `GetPipeConnector` (spawn) and
+`EndpointJson` (export) index the same way, deliberately - if they ever
+diverge, exported pipes re-apply against the wrong ports.
+
+**The game is asked whether the pairing is legal.** `CanConnectTo` is a real
+(virtual) function, and it knows the rules this code would otherwise be
+guessing at: producer/consumer direction, occupied connectors, fluid vs
+hypertube. It is called before anything is spawned. Guessing here is the
+expensive kind of wrong - a pipe that exists and carries nothing looks exactly
+like success.
+
+### What has not been checked
+
+**This has never run in a game.** It compiles, and the shape mirrors code that
+is live-verified, but the parts that matter most cannot be read locally:
+
+- **Fluid-network registration.** `AFGBuildablePipeline` implements
+  `IFGFluidIntegrantInterface`, and `AFGPipeSubsystem::RegisterFluidIntegrant`
+  exists. The assumption here is that `FinishSpawning` -> `BeginPlay` registers
+  the pipe the way it does for a pipe the build gun placed - `BeginPlay` is
+  overridden on `AFGBuildablePipeline`, which is the usual place for it. That
+  body is a stub in the local sources, so it is a hypothesis, not a fact. If it
+  is wrong, pipes will connect and carry no fluid.
+- **Spline routing for pipes.** Belts use the same strategy successfully, but
+  pipe meshes and bend radii are not belts'.
+- **`CanConnectTo`'s actual strictness**, for the same stub reason.
+
+So the live pass is not a formality here. Place a pipe between a water
+extractor and a refinery, then confirm fluid actually moves - not merely that
+the pipe appears. See the `live-verify` skill.
+
 ## Exporting the world (`GET /world/buildables`, `GET /players`)
 
 These are the read-only endpoints an exporter uses to turn a hand-built
