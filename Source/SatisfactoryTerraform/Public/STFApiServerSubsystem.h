@@ -75,6 +75,7 @@ private:
 	// Route handlers.
 	bool HandleHealth(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete);
 	bool HandleWorld(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete);
+	bool HandleClassCatalog(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete);
 	bool HandleBuildableClass(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete);
 	bool HandlePlayers(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete);
 	bool HandleWorldBuildables(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete);
@@ -110,5 +111,7 @@ private:
 	/** name (without _C) -> the Blueprint asset's generated class path. Built lazily. */
 	mutable TMap<FString, FSoftObjectPath> ClassNameIndex;
 	mutable bool bClassNameIndexBuilt = false;
+	/** GET /classes, serialised once per session - see HandleClassCatalog. */
+	mutable FString ClassCatalogJson;
 	void BuildClassNameIndex() const;
 };
