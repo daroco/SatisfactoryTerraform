@@ -1773,8 +1773,15 @@ TSharedPtr<FJsonObject> ASTFApiServerSubsystem::SpawnConnection(const TSharedPtr
 		Strategy->mSplineBendRadius = 50.0f;
 		Strategy->mLocalStartTransform = FTransform::Identity;
 		const FVector LocalEndLocation = FromTransform.InverseTransformPosition(ToConn->GetComponentLocation());
-		const FRotator LocalEndRotation = (ToConn->GetComponentRotation() - FromTransform.Rotator());
-		Strategy->mLocalEndTransform = FTransform(LocalEndRotation, LocalEndLocation);
+		// A connector's rotation points OUTWARD from its machine
+		// (GetConnectorNormal is GetComponentRotation().Vector()), but the
+		// spline's end tangent is the tube's travel direction, which runs
+		// INTO the destination - so the end faces the reverse of the
+		// connector. Composed as quaternions; subtracting FRotators is
+		// component-wise and only looks right for flat yaw-only cases.
+		const FQuat EndWorldQuat = ToConn->GetComponentQuat() * FRotator(0.0f, 180.0f, 0.0f).Quaternion();
+		const FQuat LocalEndQuat = FromTransform.GetRotation().Inverse() * EndWorldQuat;
+		Strategy->mLocalEndTransform = FTransform(LocalEndQuat, LocalEndLocation);
 
 		Strategy->PreSpawnBuildable(PipeActor);
 		PipeActor->FinishSpawning(FromTransform);
