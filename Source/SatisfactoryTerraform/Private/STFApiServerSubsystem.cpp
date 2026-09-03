@@ -16,6 +16,20 @@
 #include "FGClearanceData.h" // FFGClearanceData / EClearanceType
 #include "FGFactoryConnectionComponent.h"
 #include "FGPowerConnectionComponent.h"
+#include "Buildables/FGBuildablePipeline.h"
+#include "Buildables/FGBuildablePipeHyper.h"
+#include "Buildables/FGBuildableConveyorLift.h"
+#include "Buildables/FGBuildableRailroadTrack.h"
+#include "Buildables/FGBuildableRailroadStation.h"
+#include "Buildables/FGBuildableTrainPlatform.h"
+#include "Buildables/FGBuildableRailroadSignal.h"
+#include "Buildables/FGBuildableRailroadSwitchControl.h"
+#include "Buildables/FGBuildableResourceExtractorBase.h"
+#include "Buildables/FGBuildableSignBase.h"
+#include "Buildables/FGBuildableSplitterSmart.h"
+#include "Buildables/FGBuildableCircuitSwitch.h"
+#include "Buildables/FGBuildableLightSource.h"
+#include "FGSplineBuildableInterface.h"
 #include "Tests/FGBuildableSpawnStrategy_Spline.h"
 
 #include "Misc/ConfigCacheIni.h" // GConfig - pin the listener to loopback
@@ -325,6 +339,7 @@ void ASTFApiServerSubsystem::BindRoutesOnce()
 	Bind(TEXT("/api/v1/world"), EHttpServerRequestVerbs::VERB_GET, &ASTFApiServerSubsystem::HandleWorld);
 	Bind(TEXT("/api/v1/players"), EHttpServerRequestVerbs::VERB_GET, &ASTFApiServerSubsystem::HandlePlayers);
 	Bind(TEXT("/api/v1/world/buildables"), EHttpServerRequestVerbs::VERB_GET, &ASTFApiServerSubsystem::HandleWorldBuildables);
+	Bind(TEXT("/api/v1/classes"), EHttpServerRequestVerbs::VERB_GET, &ASTFApiServerSubsystem::HandleClassCatalog);
 	Bind(TEXT("/api/v1/classes/:class"), EHttpServerRequestVerbs::VERB_GET, &ASTFApiServerSubsystem::HandleBuildableClass);
 	Bind(TEXT("/api/v1/buildables"),
 		EHttpServerRequestVerbs::VERB_GET | EHttpServerRequestVerbs::VERB_POST,
@@ -468,6 +483,159 @@ bool ASTFApiServerSubsystem::HandleWorld(const FHttpServerRequest& Request, cons
 	Body->SetStringField(TEXT("game_version"), TEXT("")); // TODO(M1): FEngineVersion / FG changelist
 	Body->SetStringField(TEXT("mod_version"), TEXT("0.1.0"));
 	OnComplete(JsonResponse(200, Body));
+	return true;
+}
+
+bool ASTFApiServerSubsystem::HandleClassCatalog(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete)
+{
+	if (!CheckRequest(Request, OnComplete))
+	{
+		return true;
+	}
+
+	// Loading every buildable class costs seconds the first time (hundreds of
+	// Blueprint loads), and the answer never changes within a session, so it
+	// is computed once and served from the cache afterwards.
+	if (ClassCatalogJson.IsEmpty())
+	{
+		if (!bClassNameIndexBuilt)
+		{
+			BuildClassNameIndex();
+		}
+
+		TArray<FString> Names;
+		ClassNameIndex.GetKeys(Names);
+		Names.Sort();
+
+		TArray<TSharedPtr<FJsonValue>> Items;
+		for (const FString& Name : Names)
+		{
+			if (!Name.StartsWith(TEXT("Build_")))
+			{
+				continue;
+			}
+			UClass* Class = Cast<UClass>(ClassNameIndex.FindRef(Name).TryLoad());
+			if (!Class || !Class->IsChildOf(AFGBuildable::StaticClass()) || Class->HasAnyClassFlags(CLASS_Abstract))
+			{
+				continue;
+			}
+			const AFGBuildable* CDO = Class->GetDefaultObject<AFGBuildable>();
+			if (!CDO)
+			{
+				continue;
+			}
+
+			// Most specific first. Everything below "building" is a mechanism
+			// the provider does not have yet; the point of this endpoint is
+			// to count those honestly rather than let them hide behind the
+			// generic transform-placement path, which would accept the class
+			// and produce something broken.
+			const TCHAR* Mechanism = TEXT("building");
+			const TCHAR* Resource = TEXT("satisfactory_building");
+			const TCHAR* Why = TEXT("");
+			if (Name.StartsWith(TEXT("Build_Cheat")))
+			{
+				continue; // dev-only sinks/spawners, not placeable in a normal game
+			}
+			else if (Class->IsChildOf(AFGBuildableConveyorBelt::StaticClass()) || Class->IsChildOf(AFGBuildableConveyorLift::StaticClass()))
+			{
+				Mechanism = TEXT("belt");
+				Resource = TEXT("satisfactory_belt");
+			}
+			else if (Class->IsChildOf(AFGBuildableWire::StaticClass()))
+			{
+				Mechanism = TEXT("power_line");
+				Resource = TEXT("satisfactory_power_line");
+			}
+			else if (Class->IsChildOf(AFGBuildablePipeHyper::StaticClass()))
+			{
+				Mechanism = TEXT("hypertube");
+				Resource = TEXT("satisfactory_hypertube");
+			}
+			else if (Class->IsChildOf(AFGBuildablePipeline::StaticClass()))
+			{
+				Mechanism = TEXT("pipeline");
+				Resource = TEXT("satisfactory_pipeline");
+			}
+			else if (Class->IsChildOf(AFGBuildableRailroadTrack::StaticClass()))
+			{
+				Mechanism = TEXT("rail_track");
+				Resource = TEXT("");
+				Why = TEXT("a spline network with switches and signals bound to positions along it; no resource models that yet");
+			}
+			else if (Class->ImplementsInterface(UFGSplineBuildableInterface::StaticClass()))
+			{
+				Mechanism = TEXT("spline");
+				Resource = TEXT("");
+				Why = TEXT("routed along a path rather than placed at a point, and not one of the connection kinds the provider knows");
+			}
+			else if (Class->IsChildOf(AFGBuildableResourceExtractorBase::StaticClass()))
+			{
+				Mechanism = TEXT("node_bound");
+				Resource = TEXT("");
+				Why = TEXT("placed on a resource node or geyser, not at a coordinate; needs a way to discover and reference world features");
+			}
+			else if (Class->IsChildOf(AFGBuildableRailroadStation::StaticClass()) || Class->IsChildOf(AFGBuildableTrainPlatform::StaticClass()) ||
+				Class->IsChildOf(AFGBuildableRailroadSignal::StaticClass()) || Class->IsChildOf(AFGBuildableRailroadSwitchControl::StaticClass()))
+			{
+				Mechanism = TEXT("rail");
+				Resource = TEXT("");
+				Why = TEXT("attaches to track rather than standing alone");
+			}
+			else if (CDO->GetLightweightInstanceData() != nullptr)
+			{
+				Mechanism = TEXT("foundation");
+				Resource = TEXT("satisfactory_foundation");
+			}
+
+			// Placeable today, but with state the contract cannot express.
+			// Terraform can put it down; it cannot make it do anything.
+			const TCHAR* Settings = TEXT("");
+			if (Class->IsChildOf(AFGBuildableSignBase::StaticClass()))
+			{
+				Settings = TEXT("text, icon and colours");
+			}
+			else if (Class->IsChildOf(AFGBuildableSplitterSmart::StaticClass()))
+			{
+				Settings = TEXT("per-output item filter rules");
+			}
+			else if (Class->IsChildOf(AFGBuildableCircuitSwitch::StaticClass()))
+			{
+				Settings = TEXT("on/off state (and priority tier for priority switches)");
+			}
+			else if (Class->IsChildOf(AFGBuildableLightSource::StaticClass()))
+			{
+				Settings = TEXT("colour, intensity and on/off");
+			}
+
+			const TSharedPtr<FJsonObject> Json = MakeShared<FJsonObject>();
+			Json->SetStringField(TEXT("class"), Name);
+			Json->SetStringField(TEXT("display_name"), CDO->mDisplayName.ToString());
+			Json->SetStringField(TEXT("mechanism"), Mechanism);
+			Json->SetBoolField(TEXT("supported"), Resource[0] != 0);
+			if (Resource[0])
+			{
+				Json->SetStringField(TEXT("resource"), Resource);
+			}
+			if (Why[0])
+			{
+				Json->SetStringField(TEXT("why_unsupported"), Why);
+			}
+			if (Settings[0])
+			{
+				Json->SetStringField(TEXT("settings_not_modelled"), Settings);
+			}
+			Items.Add(MakeShared<FJsonValueObject>(Json));
+		}
+
+		const auto Writer = TJsonWriterFactory<>::Create(&ClassCatalogJson);
+		FJsonSerializer::Serialize(Items, Writer);
+		UE_LOG(LogSatisfactoryTerraform, Log, TEXT("Built class catalog: %d placeable classes"), Items.Num());
+	}
+
+	auto Response = FHttpServerResponse::Create(ClassCatalogJson, TEXT("application/json"));
+	Response->Code = EHttpServerResponseCodes::Ok;
+	OnComplete(MoveTemp(Response));
 	return true;
 }
 
