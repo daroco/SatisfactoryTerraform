@@ -46,8 +46,16 @@ Notes:
   active: `robocopy D:\w\SatisfactoryTerraform\SatisfactoryTerraform\SML D:\ue\SML /E /MT:16`
   (robocopy exits 1 on success). It carries its own Wwise integration, so it
   needs no credentials - but the first build after copying is cold.
-- Build.bat holds a machine-wide mutex, so a local build and a CI build
-  serialise rather than race. Correctness is safe; you may just wait.
+- **Still do not build while CI is building.** The private tree stops the
+  two from corrupting each other, but not from colliding: `Build.bat` waits
+  on a machine-wide mutex, while the packaging step (`RunUAT PackagePlugin`)
+  fails fast with `ConflictingInstance` if any other UnrealBuildTool is
+  running. A local compile timed into CI's packaging window red-lit `main`
+  that way. Check first - this must print 0:
+
+  ```sh
+  powershell -NoProfile -Command "(Get-Process UnrealBuildTool -ErrorAction SilentlyContinue | Measure-Object).Count"
+  ```
 - This compiles the Development editor. Packaging builds Shipping, a separate
   set of objects, so a clean local compile does not prove packaging works -
   one more reason CI stays the gate.
