@@ -1756,18 +1756,6 @@ TSharedPtr<FJsonObject> ASTFApiServerSubsystem::SpawnConnection(const TSharedPtr
 			return nullptr;
 		}
 
-		// Ask the game whether this pairing is legal before building
-		// anything. CanConnectTo knows the rules we would otherwise be
-		// guessing at - producer/consumer direction, already-occupied
-		// connectors, fluid vs hypertube - and getting them wrong produces a
-		// pipe that exists and carries nothing, which looks like success.
-		if (!FromConn->CanConnectTo(ToConn))
-		{
-			OutStatus = 422;
-			OutError = TEXT("those pipe connectors cannot be joined (wrong direction, wrong kind, or already connected)");
-			return nullptr;
-		}
-
 		// Pipes are spline buildables exactly as belts are (both implement
 		// IFGSplineBuildableInterface), so the placement is the same: spawn at
 		// the source connector and route a spline to the destination.
@@ -1805,6 +1793,19 @@ TSharedPtr<FJsonObject> ASTFApiServerSubsystem::SpawnConnection(const TSharedPtr
 			PipeActor->Destroy();
 			OutStatus = 422;
 			OutError = TEXT("that pipe class has no usable connectors");
+			return nullptr;
+		}
+
+		// Ask the game whether each join is legal, but ask the question
+		// vanilla asks: machine connector against the pipe's own end, which
+		// sits at that connector. An earlier version asked CanConnectTo about
+		// the two MACHINE connectors - a pairing vanilla never makes - and the
+		// game correctly refused every combination, live.
+		if (!FromConn->CanConnectTo(PipeIn) || !PipeOut->CanConnectTo(ToConn))
+		{
+			PipeActor->Destroy();
+			OutStatus = 422;
+			OutError = TEXT("the game refused that pipe joint (wrong connector direction or kind, or already connected)");
 			return nullptr;
 		}
 
