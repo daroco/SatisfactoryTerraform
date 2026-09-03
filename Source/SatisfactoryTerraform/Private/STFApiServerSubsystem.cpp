@@ -16,6 +16,9 @@
 #include "FGClearanceData.h" // FFGClearanceData / EClearanceType
 #include "FGFactoryConnectionComponent.h"
 #include "FGPowerConnectionComponent.h"
+#include "FGPipeConnectionComponent.h"
+#include "FGPipeConnectionComponentHyper.h"
+#include "Buildables/FGBuildablePipeBase.h"
 #include "Buildables/FGBuildablePipeline.h"
 #include "Buildables/FGBuildablePipeHyper.h"
 #include "Buildables/FGBuildableConveyorLift.h"
@@ -158,6 +161,29 @@ namespace
 	UFGPowerConnectionComponent* GetPowerConnector(AFGBuildable* Buildable, int32 Index)
 	{
 		TInlineComponentArray<UFGPowerConnectionComponent*> Connectors;
+		Buildable->GetComponents(Connectors);
+		return Connectors.IsValidIndex(Index) ? Connectors[Index] : nullptr;
+	}
+
+	/** Same as GetFactoryConnector but for pipe connectors, which come in two
+	  * mutually exclusive kinds: fluid (UFGPipeConnectionComponent) and
+	  * hypertube (UFGPipeConnectionComponentHyper). Indices are per-kind, so
+	  * connector 0 of a machine's fluid connectors is unrelated to connector 0
+	  * of anything else it has - the class of the connection being placed
+	  * decides which list is indexed.
+	  *
+	  * No canonical sort helper is exposed for these (unlike factory
+	  * connectors), so this uses plain component-array order, as the power
+	  * connectors above do. */
+	UFGPipeConnectionComponentBase* GetPipeConnector(AFGBuildable* Buildable, int32 Index, bool bHyper)
+	{
+		if (bHyper)
+		{
+			TInlineComponentArray<UFGPipeConnectionComponentHyper*> Connectors;
+			Buildable->GetComponents(Connectors);
+			return Connectors.IsValidIndex(Index) ? Connectors[Index] : nullptr;
+		}
+		TInlineComponentArray<UFGPipeConnectionComponent*> Connectors;
 		Buildable->GetComponents(Connectors);
 		return Connectors.IsValidIndex(Index) ? Connectors[Index] : nullptr;
 	}
@@ -915,6 +941,19 @@ bool ASTFApiServerSubsystem::HandleWorldBuildables(const FHttpServerRequest& Req
 			Owner->GetComponents(Connectors);
 			Connector = Connectors.IndexOfByKey(Power);
 		}
+		else if (const UFGPipeConnectionComponentHyper* Hyper = Cast<UFGPipeConnectionComponentHyper>(Mating))
+		{
+			// Indices are per-kind, matching GetPipeConnector on the spawn side.
+			TInlineComponentArray<UFGPipeConnectionComponentHyper*> Connectors;
+			Owner->GetComponents(Connectors);
+			Connector = Connectors.IndexOfByKey(Hyper);
+		}
+		else if (const UFGPipeConnectionComponent* Fluid = Cast<UFGPipeConnectionComponent>(Mating))
+		{
+			TInlineComponentArray<UFGPipeConnectionComponent*> Connectors;
+			Owner->GetComponents(Connectors);
+			Connector = Connectors.IndexOfByKey(Fluid);
+		}
 		if (Connector == INDEX_NONE)
 		{
 			// Reporting a guessed index would produce configuration that
@@ -972,6 +1011,15 @@ bool ASTFApiServerSubsystem::HandleWorldBuildables(const FHttpServerRequest& Req
 		{
 			From = EndpointJson(Wire->GetConnection(0));
 			To = EndpointJson(Wire->GetConnection(1));
+		}
+		else if (const AFGBuildablePipeBase* Pipe = Cast<AFGBuildablePipeBase>(It.Actor))
+		{
+			// Same shape as a belt: connection0 is the pipe end joined to the
+			// upstream buildable, connection1 the downstream one.
+			const UFGPipeConnectionComponentBase* In = Pipe->GetConnection0();
+			const UFGPipeConnectionComponentBase* OutC = Pipe->GetConnection1();
+			From = EndpointJson(In ? In->GetConnection() : nullptr);
+			To = EndpointJson(OutC ? OutC->GetConnection() : nullptr);
 		}
 		if (From.IsValid() && To.IsValid())
 		{
@@ -1309,7 +1357,7 @@ UClass* ASTFApiServerSubsystem::ResolveConnectionClass(const FString& ClassName,
 {
 	if (!ClassName.StartsWith(TEXT("Build_")) || !ClassName.EndsWith(TEXT("_C")))
 	{
-		OutError = TEXT("class must be a belt (Build_ConveyorBeltMkN_C) or Build_PowerLine_C");
+		OutError = TEXT("class must be a belt (Build_ConveyorBeltMkN_C), Build_PowerLine_C, a pipeline or a hypertube");
 		return nullptr;
 	}
 	UClass* Class = ResolveClassByName(ClassName, AFGBuildable::StaticClass(), OutError);
@@ -1317,9 +1365,11 @@ UClass* ASTFApiServerSubsystem::ResolveConnectionClass(const FString& ClassName,
 	{
 		return nullptr;
 	}
-	if (!Class->IsChildOf(AFGBuildableConveyorBelt::StaticClass()) && !Class->IsChildOf(AFGBuildableWire::StaticClass()))
+	if (!Class->IsChildOf(AFGBuildableConveyorBelt::StaticClass()) &&
+		!Class->IsChildOf(AFGBuildableWire::StaticClass()) &&
+		!Class->IsChildOf(AFGBuildablePipeBase::StaticClass()))
 	{
-		OutError = TEXT("class must be a belt (Build_ConveyorBeltMkN_C) or Build_PowerLine_C");
+		OutError = TEXT("class must be a belt (Build_ConveyorBeltMkN_C), Build_PowerLine_C, a pipeline or a hypertube");
 		return nullptr;
 	}
 	return Class;
@@ -1581,6 +1631,8 @@ TSharedPtr<FJsonObject> ASTFApiServerSubsystem::SpawnConnection(const TSharedPtr
 		return nullptr;
 	}
 	const bool bIsBelt = Class->IsChildOf(AFGBuildableConveyorBelt::StaticClass());
+	const bool bIsHyper = Class->IsChildOf(AFGBuildablePipeHyper::StaticClass());
+	const bool bIsPipe = !bIsHyper && Class->IsChildOf(AFGBuildablePipeline::StaticClass());
 
 	const TSharedPtr<FJsonObject>* FromJson = nullptr;
 	const TSharedPtr<FJsonObject>* ToJson = nullptr;
@@ -1692,6 +1744,97 @@ TSharedPtr<FJsonObject> ASTFApiServerSubsystem::SpawnConnection(const TSharedPtr
 		}
 
 		Connection = Belt;
+	}
+	else if (bIsPipe || bIsHyper)
+	{
+		UFGPipeConnectionComponentBase* FromConn = GetPipeConnector(FromBuildable, Endpoints.FromConnector, bIsHyper);
+		UFGPipeConnectionComponentBase* ToConn = GetPipeConnector(ToBuildable, Endpoints.ToConnector, bIsHyper);
+		if (!FromConn || !ToConn)
+		{
+			OutStatus = 422;
+			OutError = TEXT("from/to connector index out of range for that buildable");
+			return nullptr;
+		}
+
+		// Pipes are spline buildables exactly as belts are (both implement
+		// IFGSplineBuildableInterface), so the placement is the same: spawn at
+		// the source connector and route a spline to the destination.
+		const FTransform FromTransform(FromConn->GetComponentRotation(), FromConn->GetComponentLocation());
+		AFGBuildable* PipeActor = BuildableSubsystem->BeginSpawnBuildable(Class, FromTransform);
+		if (!PipeActor)
+		{
+			OutStatus = 422;
+			OutError = TEXT("game refused to spawn that pipe");
+			return nullptr;
+		}
+
+		UFGBuildableSpawnStrategy_Spline* Strategy = NewObject<UFGBuildableSpawnStrategy_Spline>(PipeActor);
+		Strategy->mSplineRouteStrategy = EFGSplineBuildableRouteStrategy::Auto;
+		Strategy->mSplineBendRadius = 50.0f;
+		Strategy->mLocalStartTransform = FTransform::Identity;
+		const FVector LocalEndLocation = FromTransform.InverseTransformPosition(ToConn->GetComponentLocation());
+		// A connector's rotation points OUTWARD from its machine
+		// (GetConnectorNormal is GetComponentRotation().Vector()), but the
+		// spline's end tangent is the tube's travel direction, which runs
+		// INTO the destination - so the end faces the reverse of the
+		// connector. Composed as quaternions; subtracting FRotators is
+		// component-wise and only looks right for flat yaw-only cases.
+		const FQuat EndWorldQuat = ToConn->GetComponentQuat() * FRotator(0.0f, 180.0f, 0.0f).Quaternion();
+		const FQuat LocalEndQuat = FromTransform.GetRotation().Inverse() * EndWorldQuat;
+		Strategy->mLocalEndTransform = FTransform(LocalEndQuat, LocalEndLocation);
+
+		Strategy->PreSpawnBuildable(PipeActor);
+		PipeActor->FinishSpawning(FromTransform);
+		Strategy->PostSpawnBuildable(PipeActor);
+
+		// Wire the pipe INTO the run, the same way belts are wired in: source
+		// connector to the pipe's own connection0, pipe's connection1 to the
+		// destination. Joining FromConn straight to ToConn would leave the
+		// pipe decorative and the world in a state vanilla cannot produce -
+		// the mistake that caused the conveyor-attachment dismantle crash.
+		AFGBuildablePipeBase* PipeBase = Cast<AFGBuildablePipeBase>(PipeActor);
+		UFGPipeConnectionComponentBase* PipeIn = PipeBase ? PipeBase->GetConnection0() : nullptr;
+		UFGPipeConnectionComponentBase* PipeOut = PipeBase ? PipeBase->GetConnection1() : nullptr;
+		if (!PipeIn || !PipeOut)
+		{
+			PipeActor->Destroy();
+			OutStatus = 422;
+			OutError = TEXT("that pipe class has no usable connectors");
+			return nullptr;
+		}
+
+		// Ask the game whether each join is legal, but ask the question
+		// vanilla asks: machine connector against the pipe's own end, which
+		// sits at that connector. An earlier version asked CanConnectTo about
+		// the two MACHINE connectors - a pairing vanilla never makes - and the
+		// game correctly refused every combination, live.
+		if (!FromConn->CanConnectTo(PipeIn) || !PipeOut->CanConnectTo(ToConn))
+		{
+			PipeActor->Destroy();
+			OutStatus = 422;
+			OutError = TEXT("the game refused that pipe joint (wrong connector direction or kind, or already connected)");
+			return nullptr;
+		}
+
+		FromConn->SetConnection(PipeIn);
+		PipeIn->SetConnection(FromConn);
+		PipeOut->SetConnection(ToConn);
+		ToConn->SetConnection(PipeOut);
+
+		// SetConnection returns void, so success is read back through
+		// GetConnection (a plain inline accessor). Calling from both ends
+		// keeps this correct whether or not the real implementation is
+		// two-sided.
+		if (FromConn->GetConnection() != PipeIn || PipeIn->GetConnection() != FromConn ||
+			PipeOut->GetConnection() != ToConn || ToConn->GetConnection() != PipeOut)
+		{
+			PipeActor->Destroy();
+			OutStatus = 422;
+			OutError = TEXT("game refused to connect those pipe connectors (already connected to something else?)");
+			return nullptr;
+		}
+
+		Connection = PipeActor;
 	}
 	else
 	{
