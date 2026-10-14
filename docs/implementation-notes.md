@@ -139,18 +139,30 @@ belt/wire hookup) and
 [FicsitRemoteMonitoring](https://github.com/porisius/FicsitRemoteMonitoring)
 (in-game web server patterns).
 
-## Pipelines and hypertubes (unverified)
+## Pipelines and hypertubes (join verified live, flow not yet)
 
-Placed by `SpawnConnection` alongside belts and wires. Structurally they are
-belts: `AFGBuildablePipeBase` exposes `GetConnection0()/GetConnection1()` just
-as `AFGBuildableConveyorBase` does, both implement
-`IFGSplineBuildableInterface`, and both are routed here with
-`UFGBuildableSpawnStrategy_Spline`. The pipe is wired *into* the run - source
-connector to the pipe's connection0, pipe's connection1 to the destination -
-rather than joining the two machine connectors directly, for the same reason
-belts are (see the conveyor-attachment dismantle crash above).
+Placed by `SpawnConnection` alongside belts and wires. A pipe is spawned
+with the game's own helper,
+`UFGTestBlueprintFunctionLibrary::SpawnSplineBuildable(class, fromConnection,
+toConnection)`, which paths the spline between the two connectors and
+positions the pipe's two connection components the way the pipe hologram
+does. Whatever the helper leaves unjoined is then joined with
+`MakeConnectionBetweenComponents`, machine connector against the pipe's own
+end (never the two machine connectors directly - see the conveyor-attachment
+dismantle crash above), and the result is read back through `GetConnection`
+from both ends.
 
-Two things differ.
+Why not the belt path (`BeginSpawnBuildable` + `UFGBuildableSpawnStrategy_Spline`
++ `SetConnection`)? It was tried first, and live every typed machine
+connector - producer (water extractor) or consumer (coal generator) - refused
+the pipe's connection0 through `CanConnectTo` and `CheckCompatibility`, in
+both directions, while a junction's untyped connector accepted it and the
+pipe's connection1 was accepted by everything. The hand-rolled spawn leaves
+connection0 facing along the pipe instead of back at the machine; belts do
+not care, pipes do. The helper exists for exactly this job, so the mod uses
+it instead of guessing at connector transforms.
+
+Two things differ from belts regardless.
 
 **Connector indices are per-kind.** Fluid connectors are
 `UFGPipeConnectionComponent`, hypertube connectors
@@ -161,32 +173,20 @@ to do with connector 0 of its power connectors. `GetPipeConnector` (spawn) and
 `EndpointJson` (export) index the same way, deliberately - if they ever
 diverge, exported pipes re-apply against the wrong ports.
 
-**The game is asked whether the pairing is legal.** `CanConnectTo` is a real
-(virtual) function, and it knows the rules this code would otherwise be
-guessing at: producer/consumer direction, occupied connectors, fluid vs
-hypertube. It is called before anything is spawned. Guessing here is the
-expensive kind of wrong - a pipe that exists and carries nothing looks exactly
-like success.
+**The game is asked whether the pairing is legal.** `CanConnectTo` and
+`CheckCompatibility` know the rules this code would otherwise be guessing at:
+producer/consumer direction, occupied connectors, fluid vs hypertube. A
+refusal is a 422 that carries both connectors' type, occupancy, location and
+normal, because a pipe that exists and carries nothing looks exactly like
+success.
 
 ### What has not been checked
 
-**This has never run in a game.** It compiles, and the shape mirrors code that
-is live-verified, but the parts that matter most cannot be read locally:
-
-- **Fluid-network registration.** `AFGBuildablePipeline` implements
-  `IFGFluidIntegrantInterface`, and `AFGPipeSubsystem::RegisterFluidIntegrant`
-  exists. The assumption here is that `FinishSpawning` -> `BeginPlay` registers
-  the pipe the way it does for a pipe the build gun placed - `BeginPlay` is
-  overridden on `AFGBuildablePipeline`, which is the usual place for it. That
-  body is a stub in the local sources, so it is a hypothesis, not a fact. If it
-  is wrong, pipes will connect and carry no fluid.
-- **Spline routing for pipes.** Belts use the same strategy successfully, but
-  pipe meshes and bend radii are not belts'.
-- **`CanConnectTo`'s actual strictness**, for the same stub reason.
-
-So the live pass is not a formality here. Place a pipe between a water
-extractor and a refinery, then confirm fluid actually moves - not merely that
-the pipe appears. See the `live-verify` skill.
+- **Fluid actually moving.** The join is verified (junction -> coal generator
+  through the API, both ends connected, with the old spawn path); a full
+  extractor -> pipe -> generator run with the helper is the next live gate.
+- **Hypertubes** still go through the belt-style path and have never been
+  placed live.
 
 ## Exporting the world (`GET /world/buildables`, `GET /players`)
 
@@ -367,10 +367,14 @@ How one is driven, mirroring one build-gun aim:
   hologram yields `valid: null` + `preview_unavailable` rather than an error.
 - A synthetic `FHitResult` at the requested point (hit actor = the node, for
   extractors, so the extractor hologram's snap logic finds it), then
-  `SetScrollRotateValue(yaw)` → `PreHologramPlacement` →
-  `TrySnapToActor` or `SetHologramLocationAndRotation` →
-  `PostHologramPlacement`. Coordinate-placed classes are then forced to the
-  exact requested transform (the API does not snap, so the ghost should not
+  `SetScrollRotateValue(yaw)` → `UpdateHologramPlacement(hit)`, the build
+  gun's one entry point per frame. Calling its parts (pre-placement, snap or
+  place, post-placement) separately left the hologram reporting
+  `FGCDInitializing` forever - seen live. The hit is kept with the preview
+  and the hologram is driven again on every read (`GET /preview/:id`), since
+  the game's answer to the first update is "initializing" and only a later
+  update settles it. Coordinate-placed classes are then forced to the exact
+  requested transform (the API does not snap, so the ghost should not
   either). `CheckValidPlacement` is protected, reached through a
   derived-class access shim rather than `ValidatePlacementAndCost`, which
   would also run the build-cost check against an inventory and report "cannot

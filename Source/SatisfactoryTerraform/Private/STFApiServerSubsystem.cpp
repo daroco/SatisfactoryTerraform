@@ -53,6 +53,7 @@
 #include "Buildables/FGBuildableLightSource.h"
 #include "FGSplineBuildableInterface.h"
 #include "Tests/FGBuildableSpawnStrategy_Spline.h"
+#include "Tests/FGTestBlueprintFunctionLibrary.h"
 
 #include "Misc/ConfigCacheIni.h" // GConfig - pin the listener to loopback
 #include "HAL/PlatformMisc.h"    // FPlatformMisc::GetEnvironmentVariable (token)
@@ -1897,11 +1898,14 @@ TSharedPtr<FJsonObject> ASTFApiServerSubsystem::SpawnConnection(const TSharedPtr
 			return nullptr;
 		}
 
-		// Pipes are spline buildables exactly as belts are (both implement
-		// IFGSplineBuildableInterface), so the placement is the same: spawn at
-		// the source connector and route a spline to the destination.
-		const FTransform FromTransform(FromConn->GetComponentRotation(), FromConn->GetComponentLocation());
-		AFGBuildable* PipeActor = BuildableSubsystem->BeginSpawnBuildable(Class, FromTransform);
+		// Spawn the pipe with the game's own helper, which paths a spline from
+		// one connector to the other and places the pipe's two connection
+		// components the way the pipe hologram does. The hand-rolled spline
+		// spawn used for belts left the pipe's connection0 facing the wrong
+		// way: live, every typed (producer/consumer) machine connector refused
+		// it through CanConnectTo while the junction's untyped one accepted
+		// it, and connection1 was accepted by everything.
+		AFGBuildable* PipeActor = UFGTestBlueprintFunctionLibrary::SpawnSplineBuildable(Class, FromConn, ToConn, nullptr);
 		if (!PipeActor)
 		{
 			OutStatus = 422;
@@ -1909,30 +1913,6 @@ TSharedPtr<FJsonObject> ASTFApiServerSubsystem::SpawnConnection(const TSharedPtr
 			return nullptr;
 		}
 
-		UFGBuildableSpawnStrategy_Spline* Strategy = NewObject<UFGBuildableSpawnStrategy_Spline>(PipeActor);
-		Strategy->mSplineRouteStrategy = EFGSplineBuildableRouteStrategy::Auto;
-		Strategy->mSplineBendRadius = 50.0f;
-		Strategy->mLocalStartTransform = FTransform::Identity;
-		const FVector LocalEndLocation = FromTransform.InverseTransformPosition(ToConn->GetComponentLocation());
-		// A connector's rotation points OUTWARD from its machine
-		// (GetConnectorNormal is GetComponentRotation().Vector()), but the
-		// spline's end tangent is the tube's travel direction, which runs
-		// INTO the destination - so the end faces the reverse of the
-		// connector. Composed as quaternions; subtracting FRotators is
-		// component-wise and only looks right for flat yaw-only cases.
-		const FQuat EndWorldQuat = ToConn->GetComponentQuat() * FRotator(0.0f, 180.0f, 0.0f).Quaternion();
-		const FQuat LocalEndQuat = FromTransform.GetRotation().Inverse() * EndWorldQuat;
-		Strategy->mLocalEndTransform = FTransform(LocalEndQuat, LocalEndLocation);
-
-		Strategy->PreSpawnBuildable(PipeActor);
-		PipeActor->FinishSpawning(FromTransform);
-		Strategy->PostSpawnBuildable(PipeActor);
-
-		// Wire the pipe INTO the run, the same way belts are wired in: source
-		// connector to the pipe's own connection0, pipe's connection1 to the
-		// destination. Joining FromConn straight to ToConn would leave the
-		// pipe decorative and the world in a state vanilla cannot produce -
-		// the mistake that caused the conveyor-attachment dismantle crash.
 		AFGBuildablePipeBase* PipeBase = Cast<AFGBuildablePipeBase>(PipeActor);
 		UFGPipeConnectionComponentBase* PipeIn = PipeBase ? PipeBase->GetConnection0() : nullptr;
 		UFGPipeConnectionComponentBase* PipeOut = PipeBase ? PipeBase->GetConnection1() : nullptr;
@@ -1944,51 +1924,49 @@ TSharedPtr<FJsonObject> ASTFApiServerSubsystem::SpawnConnection(const TSharedPtr
 			return nullptr;
 		}
 
-		// Ask the game whether each join is legal, machine connector against
-		// the pipe's own end (the pairing vanilla makes). Two questions exist:
-		// CanConnectTo, and CheckCompatibility, which is what the pipe
-		// hologram actually asks when it builds. Live, a water extractor to a
-		// coal generator - one producer, one consumer, both free - was
-		// refused by CanConnectTo in both directions while nothing in the
-		// game's log said why, so the gate here is CheckCompatibility, and
-		// every refusal reports everything the check could have looked at.
-		// The SetConnection read-back below remains the real proof.
+		// The helper may or may not join the ends (its comment only promises
+		// the path). Join whatever is still loose, machine connector against
+		// the pipe's own end, after asking the game whether that join is legal
+		// - every refusal reports everything the check could have looked at.
 		const auto Describe = [](const UFGPipeConnectionComponentBase* C)
 		{
-			return FString::Printf(TEXT("type=%d connected=%d at (%.0f,%.0f,%.0f)"),
+			return FString::Printf(TEXT("type=%d connected=%d at (%.0f,%.0f,%.0f) normal (%.2f,%.2f,%.2f)"),
 				static_cast<int32>(C->GetPipeConnectionType()), C->IsConnected() ? 1 : 0,
-				C->GetComponentLocation().X, C->GetComponentLocation().Y, C->GetComponentLocation().Z);
+				C->GetComponentLocation().X, C->GetComponentLocation().Y, C->GetComponentLocation().Z,
+				C->GetConnectorNormal().X, C->GetConnectorNormal().Y, C->GetConnectorNormal().Z);
 		};
-		const bool bCanA = FromConn->CanConnectTo(PipeIn);
-		const bool bCanB = PipeOut->CanConnectTo(ToConn);
-		const bool bCompatA = FromConn->CheckCompatibility(PipeIn, nullptr);
-		const bool bCompatB = PipeOut->CheckCompatibility(ToConn, nullptr);
-		const FString Diagnostics = FString::Printf(
-			TEXT("from[%s] pipe0[%s] pipe1[%s] to[%s] pipe1->to distance %.0f; canConnect from->pipe0=%d pipe1->to=%d; compatible from/pipe0=%d pipe1/to=%d"),
-			*Describe(FromConn), *Describe(PipeIn), *Describe(PipeOut), *Describe(ToConn),
-			FVector::Dist(PipeOut->GetComponentLocation(), ToConn->GetComponentLocation()),
-			bCanA ? 1 : 0, bCanB ? 1 : 0, bCompatA ? 1 : 0, bCompatB ? 1 : 0);
-		if (!bCanA || !bCanB)
+		const bool bJoinedA = FromConn->GetConnection() == PipeIn && PipeIn->GetConnection() == FromConn;
+		const bool bJoinedB = PipeOut->GetConnection() == ToConn && ToConn->GetConnection() == PipeOut;
+		if (!bJoinedA || !bJoinedB)
 		{
-			UE_LOG(LogSatisfactoryTerraform, Warning, TEXT("Pipe %s: CanConnectTo refused; %s"), *TFID, *Diagnostics);
-		}
-		if (!bCompatA || !bCompatB)
-		{
-			PipeActor->Destroy();
-			OutStatus = 422;
-			OutError = FString::Printf(TEXT("the game refused that pipe joint (wrong connector direction or kind, or already connected): %s"), *Diagnostics);
-			return nullptr;
+			const bool bCanA = bJoinedA || FromConn->CanConnectTo(PipeIn);
+			const bool bCanB = bJoinedB || PipeOut->CanConnectTo(ToConn);
+			const bool bCompatA = bJoinedA || FromConn->CheckCompatibility(PipeIn, nullptr);
+			const bool bCompatB = bJoinedB || PipeOut->CheckCompatibility(ToConn, nullptr);
+			const FString Diagnostics = FString::Printf(
+				TEXT("from[%s] pipe0[%s] pipe1[%s] to[%s]; joined by spawn from/pipe0=%d pipe1/to=%d; canConnect from->pipe0=%d pipe1->to=%d; compatible from/pipe0=%d pipe1/to=%d"),
+				*Describe(FromConn), *Describe(PipeIn), *Describe(PipeOut), *Describe(ToConn),
+				bJoinedA ? 1 : 0, bJoinedB ? 1 : 0, bCanA ? 1 : 0, bCanB ? 1 : 0, bCompatA ? 1 : 0, bCompatB ? 1 : 0);
+			if (!bCanA || !bCanB || !bCompatA || !bCompatB)
+			{
+				UE_LOG(LogSatisfactoryTerraform, Warning, TEXT("Pipe %s: join refused; %s"), *TFID, *Diagnostics);
+				PipeActor->Destroy();
+				OutStatus = 422;
+				OutError = FString::Printf(TEXT("the game refused that pipe joint (wrong connector direction or kind, or already connected): %s"), *Diagnostics);
+				return nullptr;
+			}
+			if (!bJoinedA)
+			{
+				UFGTestBlueprintFunctionLibrary::MakeConnectionBetweenComponents(FromConn, PipeIn);
+			}
+			if (!bJoinedB)
+			{
+				UFGTestBlueprintFunctionLibrary::MakeConnectionBetweenComponents(PipeOut, ToConn);
+			}
 		}
 
-		FromConn->SetConnection(PipeIn);
-		PipeIn->SetConnection(FromConn);
-		PipeOut->SetConnection(ToConn);
-		ToConn->SetConnection(PipeOut);
-
-		// SetConnection returns void, so success is read back through
-		// GetConnection (a plain inline accessor). Calling from both ends
-		// keeps this correct whether or not the real implementation is
-		// two-sided.
+		// Success is read back through GetConnection from both ends, since
+		// nothing above returns a verdict.
 		if (FromConn->GetConnection() != PipeIn || PipeIn->GetConnection() != FromConn ||
 			PipeOut->GetConnection() != ToConn || ToConn->GetConnection() != PipeOut)
 		{
@@ -2562,6 +2540,30 @@ namespace
 	  * frame), and the answer right after spawning is "FGCDInitializing"
 	  * until it has ticked once - seen live. So the POST response can be
 	  * provisional and the next read, a tick or more later, is the real one. */
+	/** Drive a standing hologram through one build-gun update with the aim it
+	  * was requested with, then run the placement check. UpdateHologramPlacement
+	  * is the build gun's one entry point per frame (pre-placement, snap or
+	  * place, post-placement, and whatever bookkeeping the hologram does on
+	  * being updated); calling its parts separately left the hologram
+	  * reporting "initializing" forever - seen live. */
+	void DriveHologram(const FSTFPreview& Preview)
+	{
+		AFGHologram* Hologram = Preview.Hologram.Get();
+		if (!Hologram)
+		{
+			return;
+		}
+		Hologram->SetScrollRotateValue(Preview.ScrollRotate);
+		Hologram->UpdateHologramPlacement(Preview.Hit);
+		if (Preview.bPin)
+		{
+			Hologram->SetActorLocationAndRotation(Preview.PinLocation, FRotator(0, Preview.PinYaw, 0));
+		}
+		CheckHologramPlacement(Hologram);
+		const bool bValid = Hologram->CanConstruct();
+		Hologram->SetPlacementMaterialState(bValid ? EHologramMaterialState::HMS_OK : EHologramMaterialState::HMS_ERROR);
+	}
+
 	TSharedPtr<FJsonObject> PreviewToJson(const FString& Key, const FSTFPreview& Preview)
 	{
 		const TSharedPtr<FJsonObject> Json = MakeShared<FJsonObject>();
@@ -2569,9 +2571,8 @@ namespace
 		Json->SetStringField(TEXT("class"), Preview.Class);
 		if (AFGHologram* Hologram = Preview.Hologram.Get())
 		{
-			CheckHologramPlacement(Hologram);
+			DriveHologram(Preview);
 			const bool bValid = Hologram->CanConstruct();
-			Hologram->SetPlacementMaterialState(bValid ? EHologramMaterialState::HMS_OK : EHologramMaterialState::HMS_ERROR);
 			Json->SetBoolField(TEXT("valid"), bValid);
 			Json->SetArrayField(TEXT("disqualifiers"), DisqualifierNames(Hologram));
 			const FVector Loc = Hologram->GetActorLocation();
@@ -2756,32 +2757,24 @@ TSharedPtr<FJsonObject> ASTFApiServerSubsystem::SpawnPreview(const TSharedPtr<FJ
 		Hit.HitObjectHandle = FActorInstanceHandle(Placement.ResourceActor);
 		Hit.Component = Cast<UPrimitiveComponent>(Placement.ResourceActor->GetRootComponent());
 	}
-	Hologram->SetScrollRotateValue(FMath::RoundToInt(Yaw));
-	Hologram->PreHologramPlacement(Hit);
-	if (!Hologram->TrySnapToActor(Hit))
-	{
-		Hologram->SetHologramLocationAndRotation(Hit);
-	}
-	Hologram->PostHologramPlacement(Hit);
-	if (!Placement.ResourceActor)
-	{
-		// The API spawns at exactly the requested transform (no snapping), so
-		// the ghost - and the clearance check on it - should sit exactly
-		// there too, whatever grid the hologram would have snapped to.
-		Hologram->SetActorLocationAndRotation(Loc, FRotator(0, Yaw, 0));
-	}
-	CheckHologramPlacement(Hologram);
-	const bool bValid = Hologram->CanConstruct();
-	Hologram->SetPlacementMaterialState(bValid ? EHologramMaterialState::HMS_OK : EHologramMaterialState::HMS_ERROR);
-	Hologram->SetDisabled(false);
-	Hologram->SetActorHiddenInGame(false);
-
 	FSTFPreview Preview;
 	Preview.Hologram = Hologram;
 	Preview.Class = Class->GetName();
 	Preview.ExpiresAt = FPlatformTime::Seconds() + TTL;
+	Preview.Hit = Hit;
+	Preview.ScrollRotate = FMath::RoundToInt(Yaw);
+	// The API spawns at exactly the requested transform (no snapping), so
+	// the ghost - and the clearance check on it - should sit exactly there
+	// too, whatever grid the hologram would have snapped to. Extractors are
+	// the exception: their hologram must snap to the node.
+	Preview.bPin = Placement.ResourceActor == nullptr;
+	Preview.PinLocation = Loc;
+	Preview.PinYaw = Yaw;
+	DriveHologram(Preview);
+	Hologram->SetDisabled(false);
+	Hologram->SetActorHiddenInGame(false);
 	Previews.Add(Key, Preview);
-	UE_LOG(LogSatisfactoryTerraform, Verbose, TEXT("Preview %s: %s %s"), *Key, *Class->GetName(), bValid ? TEXT("valid") : TEXT("INVALID"));
+	UE_LOG(LogSatisfactoryTerraform, Verbose, TEXT("Preview %s: %s %s"), *Key, *Class->GetName(), Hologram->CanConstruct() ? TEXT("valid") : TEXT("INVALID"));
 	OutStatus = 200;
 	return PreviewToJson(Key, Preview);
 }

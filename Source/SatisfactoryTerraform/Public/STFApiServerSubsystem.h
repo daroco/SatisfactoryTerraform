@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Engine/EngineTypes.h" // FHitResult
 #include "Subsystem/ModSubsystem.h"
 #include "HttpResultCallback.h"
 #include "HttpServerRequest.h"
@@ -20,6 +21,16 @@ struct FSTFPreview
 	FString Class;
 	/** FPlatformTime::Seconds() at which the hologram is removed. */
 	double ExpiresAt = 0;
+	/** The aim the hologram was driven with, so a read can drive it again:
+	  * a hologram validates against its last update, and the game's own
+	  * answer to the first update is "initializing". */
+	FHitResult Hit;
+	int32 ScrollRotate = 0;
+	/** Pin the ghost at exactly the requested transform after the update
+	  * (free placement; not for extractors, which must snap to their node). */
+	bool bPin = false;
+	FVector PinLocation = FVector::ZeroVector;
+	float PinYaw = 0.0f;
 };
 
 /**
