@@ -198,14 +198,16 @@ jobs:
         run: |
           $dir = Join-Path $env:APPDATA "Unreal Engine\UnrealBuildTool"
           New-Item -ItemType Directory -Force $dir | Out-Null
+          # YAML strips this block's indentation, so the here-string
+          # terminator does land at column 0 as PowerShell requires.
           @"
-<?xml version="1.0" encoding="utf-8" ?>
-<Configuration xmlns="https://www.unrealengine.com/BuildConfiguration">
-  <BuildConfiguration>
-    <MaxParallelActions>6</MaxParallelActions>
-  </BuildConfiguration>
-</Configuration>
-"@ | Set-Content -Encoding utf8 (Join-Path $dir "BuildConfiguration.xml")
+          <?xml version="1.0" encoding="utf-8" ?>
+          <Configuration xmlns="https://www.unrealengine.com/BuildConfiguration">
+            <BuildConfiguration>
+              <MaxParallelActions>6</MaxParallelActions>
+            </BuildConfiguration>
+          </Configuration>
+          "@ | Set-Content -Encoding utf8 (Join-Path $dir "BuildConfiguration.xml")
 
       - name: Build editor binaries
         shell: pwsh
