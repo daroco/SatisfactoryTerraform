@@ -392,3 +392,16 @@ Unknowns, in the order they will be hit live:
 4. Whether a client in a multiplayer session sees the holograms
    (replication is the hologram's own business; irrelevant for the
    single-player target).
+
+### Visible to everyone
+
+Holograms are spawned on the host with authority and nothing here opts out
+of replication, so in a multiplayer session every connected player should
+see the planned factory appear as ghosts, the same way vanilla shows another
+pioneer's build hologram. That is intended: a plan the whole server can
+walk through before it is applied. `AFGHologram::IsNetRelevantFor` is
+overridden in the game and stubbed locally, so whether it lets a hologram
+owned by the host's build gun (or by the subsystem) reach other clients is
+a live check in a two-player session, not a certainty. If it does not,
+the fallback is to spawn the preview with no owner and
+`bOnlyRelevantToOwner` off.
