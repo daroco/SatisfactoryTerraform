@@ -434,7 +434,7 @@ void ASTFApiServerSubsystem::BindRoutesOnce()
 	Bind(TEXT("/api/v1/preview"),
 		EHttpServerRequestVerbs::VERB_GET | EHttpServerRequestVerbs::VERB_POST | EHttpServerRequestVerbs::VERB_DELETE,
 		&ASTFApiServerSubsystem::HandlePreview);
-	Bind(TEXT("/api/v1/preview/:tf_id"), EHttpServerRequestVerbs::VERB_DELETE, &ASTFApiServerSubsystem::HandlePreviewByID);
+	Bind(TEXT("/api/v1/preview/:tf_id"), EHttpServerRequestVerbs::VERB_GET | EHttpServerRequestVerbs::VERB_DELETE, &ASTFApiServerSubsystem::HandlePreviewByID);
 	Bind(TEXT("/api/v1/classes"), EHttpServerRequestVerbs::VERB_GET, &ASTFApiServerSubsystem::HandleClassCatalog);
 	Bind(TEXT("/api/v1/classes/:class"), EHttpServerRequestVerbs::VERB_GET, &ASTFApiServerSubsystem::HandleBuildableClass);
 	Bind(TEXT("/api/v1/buildables"),
@@ -1944,16 +1944,39 @@ TSharedPtr<FJsonObject> ASTFApiServerSubsystem::SpawnConnection(const TSharedPtr
 			return nullptr;
 		}
 
-		// Ask the game whether each join is legal, but ask the question
-		// vanilla asks: machine connector against the pipe's own end, which
-		// sits at that connector. An earlier version asked CanConnectTo about
-		// the two MACHINE connectors - a pairing vanilla never makes - and the
-		// game correctly refused every combination, live.
-		if (!FromConn->CanConnectTo(PipeIn) || !PipeOut->CanConnectTo(ToConn))
+		// Ask the game whether each join is legal, machine connector against
+		// the pipe's own end (the pairing vanilla makes). Two questions exist:
+		// CanConnectTo, and CheckCompatibility, which is what the pipe
+		// hologram actually asks when it builds. Live, a water extractor to a
+		// coal generator - one producer, one consumer, both free - was
+		// refused by CanConnectTo in both directions while nothing in the
+		// game's log said why, so the gate here is CheckCompatibility, and
+		// every refusal reports everything the check could have looked at.
+		// The SetConnection read-back below remains the real proof.
+		const auto Describe = [](const UFGPipeConnectionComponentBase* C)
+		{
+			return FString::Printf(TEXT("type=%d connected=%d at (%.0f,%.0f,%.0f)"),
+				static_cast<int32>(C->GetPipeConnectionType()), C->IsConnected() ? 1 : 0,
+				C->GetComponentLocation().X, C->GetComponentLocation().Y, C->GetComponentLocation().Z);
+		};
+		const bool bCanA = FromConn->CanConnectTo(PipeIn);
+		const bool bCanB = PipeOut->CanConnectTo(ToConn);
+		const bool bCompatA = FromConn->CheckCompatibility(PipeIn, nullptr);
+		const bool bCompatB = PipeOut->CheckCompatibility(ToConn, nullptr);
+		const FString Diagnostics = FString::Printf(
+			TEXT("from[%s] pipe0[%s] pipe1[%s] to[%s] pipe1->to distance %.0f; canConnect from->pipe0=%d pipe1->to=%d; compatible from/pipe0=%d pipe1/to=%d"),
+			*Describe(FromConn), *Describe(PipeIn), *Describe(PipeOut), *Describe(ToConn),
+			FVector::Dist(PipeOut->GetComponentLocation(), ToConn->GetComponentLocation()),
+			bCanA ? 1 : 0, bCanB ? 1 : 0, bCompatA ? 1 : 0, bCompatB ? 1 : 0);
+		if (!bCanA || !bCanB)
+		{
+			UE_LOG(LogSatisfactoryTerraform, Warning, TEXT("Pipe %s: CanConnectTo refused; %s"), *TFID, *Diagnostics);
+		}
+		if (!bCompatA || !bCompatB)
 		{
 			PipeActor->Destroy();
 			OutStatus = 422;
-			OutError = TEXT("the game refused that pipe joint (wrong connector direction or kind, or already connected)");
+			OutError = FString::Printf(TEXT("the game refused that pipe joint (wrong connector direction or kind, or already connected): %s"), *Diagnostics);
 			return nullptr;
 		}
 
@@ -2534,15 +2557,22 @@ namespace
 		return Out;
 	}
 
-	/** PreviewResult for a standing hologram. */
+	/** PreviewResult for a standing hologram. Re-runs the placement check
+	  * first: a hologram only validates when asked (the build gun asks every
+	  * frame), and the answer right after spawning is "FGCDInitializing"
+	  * until it has ticked once - seen live. So the POST response can be
+	  * provisional and the next read, a tick or more later, is the real one. */
 	TSharedPtr<FJsonObject> PreviewToJson(const FString& Key, const FSTFPreview& Preview)
 	{
 		const TSharedPtr<FJsonObject> Json = MakeShared<FJsonObject>();
 		Json->SetStringField(TEXT("tf_id"), Key);
 		Json->SetStringField(TEXT("class"), Preview.Class);
-		if (const AFGHologram* Hologram = Preview.Hologram.Get())
+		if (AFGHologram* Hologram = Preview.Hologram.Get())
 		{
-			Json->SetBoolField(TEXT("valid"), Hologram->CanConstruct());
+			CheckHologramPlacement(Hologram);
+			const bool bValid = Hologram->CanConstruct();
+			Hologram->SetPlacementMaterialState(bValid ? EHologramMaterialState::HMS_OK : EHologramMaterialState::HMS_ERROR);
+			Json->SetBoolField(TEXT("valid"), bValid);
 			Json->SetArrayField(TEXT("disqualifiers"), DisqualifierNames(Hologram));
 			const FVector Loc = Hologram->GetActorLocation();
 			Json->SetNumberField(TEXT("x"), Loc.X);
@@ -2810,8 +2840,23 @@ bool ASTFApiServerSubsystem::HandlePreviewByID(const FHttpServerRequest& Request
 	{
 		return true;
 	}
-	// Idempotent: an already-expired preview is simply not there.
-	RemovePreview(PathID(Request));
+	const FString Key = PathID(Request);
+	if (Request.Verb == EHttpServerRequestVerbs::VERB_GET)
+	{
+		// One standing hologram, re-validated now (see PreviewToJson). The
+		// provider reads this when a POST came back "initializing".
+		PurgeExpiredPreviews();
+		const FSTFPreview* Preview = Previews.Find(Key);
+		if (!Preview)
+		{
+			OnComplete(ErrorResponse(404, TEXT("no preview with that tf_id (expired or never shown)")));
+			return true;
+		}
+		OnComplete(JsonResponse(200, PreviewToJson(Key, *Preview)));
+		return true;
+	}
+	// DELETE. Idempotent: an already-expired preview is simply not there.
+	RemovePreview(Key);
 	OnComplete(NoContentResponse());
 	return true;
 }
