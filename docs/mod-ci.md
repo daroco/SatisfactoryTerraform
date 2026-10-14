@@ -39,7 +39,11 @@ The game project needs the Wwise UE integration to compile. Create a free
 credentials as the two secrets. CI uses
 [`mircearoata/wwise-cli`](https://github.com/mircearoata/wwise-cli) (the same
 tool SML's own CI uses) to download and integrate the SDK, cached under
-`C:\CI\Wwise`.
+`C:\CI\Wwise`. The Wwise SDK and integration versions are read from SML's
+own `.github/workflows/build.yml` at the checked-out ref, not pinned here:
+SML's Wwise patches only apply to the integration they were written for, so
+when SML master moves to a new Wwise (as it did from 2023.1.14 to 2025.1.6)
+a pinned version fails the patch dry-run before any mod code compiles.
 
 ## What a run does
 

@@ -158,10 +158,21 @@ jobs:
             if ($LASTEXITCODE -ne 0) { Write-Error "wwise-cli download failed" }
             Rename-Item C:\CI\wwise-cli_windows_amd64.exe wwise-cli.exe
           }
-          # Filters and versions mirror SML's own build.yml (sdk-version and
-          # integration-version are intentionally different). The empty
+          # Versions come from SML's own build.yml at the ref we checked out,
+          # because SML's Wwise patches are written against one specific
+          # Wwise integration: when SML master moved from 2023.1.14 to
+          # 2025.1.6 (game CL503514), a pinned 2023 integration failed its
+          # patch dry-run before a line of mod code compiled. sdk-version and
+          # integration-version are intentionally different. The empty
           # DeploymentPlatforms filter includes the platform-agnostic files.
-          C:\CI\wwise-cli.exe download --sdk-version "2023.1.14.8770" `
+          $smlBuild = Get-Content "SML\.github\workflows\build.yml" -Raw
+          $sdkVersion = [regex]::Match($smlBuild, '--sdk-version "(\d+(?:\.\d+)+)"').Groups[1].Value
+          $integrationVersion = [regex]::Match($smlBuild, '--integration-version "(\d+(?:\.\d+)+)"').Groups[1].Value
+          if ([string]::IsNullOrEmpty($sdkVersion) -or [string]::IsNullOrEmpty($integrationVersion)) {
+            Write-Error "Could not read the Wwise sdk/integration versions from SML's build.yml; its format changed."
+          }
+          Write-Host "Wwise SDK $sdkVersion, UE integration $integrationVersion (from SML build.yml)"
+          C:\CI\wwise-cli.exe download --sdk-version $sdkVersion `
             --filter "Packages=SDK" `
             --filter "DeploymentPlatforms=Windows_vc160" `
             --filter "DeploymentPlatforms=Windows_vc170" `
@@ -170,7 +181,7 @@ jobs:
             --email $env:WWISE_EMAIL --password $env:WWISE_PASSWORD `
             --cache-dir "${{ env.WWISE_CACHE }}"
           if ($LASTEXITCODE -ne 0) { Write-Error "wwise-cli download of the SDK failed" }
-          C:\CI\wwise-cli.exe integrate-ue --integration-version "2023.1.14.3555" `
+          C:\CI\wwise-cli.exe integrate-ue --integration-version $integrationVersion `
             --project "$PWD\SML\FactoryGame.uproject" `
             --email $env:WWISE_EMAIL --password $env:WWISE_PASSWORD `
             --cache-dir "${{ env.WWISE_CACHE }}"
