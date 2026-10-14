@@ -45,6 +45,14 @@ SML's Wwise patches only apply to the integration they were written for, so
 when SML master moves to a new Wwise (as it did from 2023.1.14 to 2025.1.6)
 a pinned version fails the patch dry-run before any mod code compiles.
 
+Compiles are capped at six in parallel (a `BuildConfiguration.xml` the
+workflow writes under `%APPDATA%\Unreal Engine\UnrealBuildTool`, so it also
+governs the packaging step). At the default of one per logical CPU the Wwise
+2025 precompiled headers exhaust memory on this 64 GB box when the game and
+Docker are up: `c1xx: error C3859: Failed to create virtual memory for PCH`.
+The file persists on the runner, so local builds in `D:\ue\SML` get the same
+cap.
+
 ## What a run does
 
 1. Checks out `satisfactorymodding/SatisfactoryModLoader` (the modding starter

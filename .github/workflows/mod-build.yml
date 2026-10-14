@@ -187,12 +187,33 @@ jobs:
             --cache-dir "${{ env.WWISE_CACHE }}"
           if ($LASTEXITCODE -ne 0) { Write-Error "wwise-cli integrate-ue failed" }
 
+      # UnrealBuildTool defaults to one compile per logical CPU (16 here). With
+      # the Wwise 2025 integration's precompiled headers that ran the box out
+      # of memory - "c1xx: error C3859: Failed to create virtual memory for
+      # PCH" across AkAudio - while the game, Docker and a browser were also
+      # resident. Six at a time fits; the XML covers every UBT invocation
+      # (the packaging step's too, which Build.bat flags would not reach).
+      - name: Cap compile parallelism
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:APPDATA "Unreal Engine\UnrealBuildTool"
+          New-Item -ItemType Directory -Force $dir | Out-Null
+          @"
+<?xml version="1.0" encoding="utf-8" ?>
+<Configuration xmlns="https://www.unrealengine.com/BuildConfiguration">
+  <BuildConfiguration>
+    <MaxParallelActions>6</MaxParallelActions>
+  </BuildConfiguration>
+</Configuration>
+"@ | Set-Content -Encoding utf8 (Join-Path $dir "BuildConfiguration.xml")
+
       - name: Build editor binaries
         shell: pwsh
         run: |
           & "${{ env.UE_ROOT }}\Engine\Build\BatchFiles\Build.bat" `
             FactoryEditor Win64 Development `
-            -project="$PWD\SML\FactoryGame.uproject"
+            -project="$PWD\SML\FactoryGame.uproject" `
+            -MaxParallelActions=6
           if ($LASTEXITCODE -ne 0) { Write-Error "editor build failed" }
 
       # Linux dedicated server is intentionally out of scope for now: it needs
