@@ -288,3 +288,107 @@ through `IFGDismantleInterface::Execute_Dismantle`, same as the existing
 fallback for classes that don't implement the interface at all. Cost: no
 build-cost refund on dismantle for this class family specifically - cheap
 for a splitter/merger, and far better than a crash.
+
+## Extractors and resource nodes (not yet live-verified)
+
+Miners, water extractors, oil extractors and fracking buildings
+(`AFGBuildableResourceExtractorBase`) are not placed at a coordinate - they
+are placed *on* a world feature and refuse to produce otherwise. Two things
+make that work through the API:
+
+- `GET /api/v1/world/resource-nodes` enumerates the features with
+  `TActorIterator<AFGResourceNodeBase>` (deposits skipped - those are the
+  pickable rocks) and `TActorIterator<AFGWaterVolume>` (only volumes whose
+  `CanPlaceResourceExtractor()` is true). Plain iteration, because
+  `AFGResourceNodeManager` keeps its node arrays private and its accessor is
+  stub-only. Each feature's `id` is its actor path name (`GetPathName()`),
+  which is the one stable handle the engine gives a level actor. Position
+  and yaw are what the feature itself answers to
+  `GetPlacementLocation/Rotation` - the same question the hologram asks -
+  falling back to the actor transform when it answers zero. Water volumes
+  are areas, so they are reported at the centre of their component bounding
+  box at surface height (`Max.Z`), with `bounds_min/max`.
+- `POST /api/v1/buildables` with `node_id`: `ResolvePlacement` resolves the
+  path (`FindObject`, falling back to iterating the two actor kinds),
+  refuses an occupied feature with 409, asks the class default object
+  `IsAllowedOnResource` (the public predicate the hologram also uses: form,
+  allowed-resource list, node-type restriction - real compiled code, stub
+  locally), and derives the transform from the feature. The spawn mirrors
+  the hologram's order: `BeginSpawnBuildable` →
+  `SetExtractableResource(node)` → `FinishSpawning`, because
+  `AFGResourceExtractorHologram::ConfigureActor` binds the resource on the
+  deferred actor before BeginPlay runs. After spawning, the node is marked
+  occupied if the game did not already do it; on DELETE it is marked free
+  before dismantling. Both are belt-and-braces: the real `BeginPlay` /
+  `Destroyed` bodies almost certainly do this, but they are not inspectable
+  here.
+
+Assumed, to be checked in a live session, in this order:
+
+1. The whole-map node count and the Grasslands nodes nearest a known point
+   come back with the right resource/purity. If distant nodes are missing
+   the listing is "loaded features only" and the docs should say so.
+2. A miner spawned on a free iron node reads `occupied=true` on the node,
+   sits on it visually, and puts ore on a belt. A second POST on the same
+   node is a 409 with nothing left behind. DELETE frees the node.
+3. A water extractor via `node_id` + `placement.x/y` sits at the surface,
+   and a pipeline from it carries water into a coal generator - this is also
+   the first live proof that the pipeline spawn path works at all.
+4. `GetPlacementLocation/Rotation` really return the node transform (if
+   they return zero for every node, the fallback silently makes this the
+   actor transform, which may be a different pivot).
+
+`clock_speed` is now reported and patchable on any `AFGBuildableFactory`
+whose `GetCanChangePotential()` is true (manufacturers, extractors,
+generators) instead of manufacturers only; `recipe` stays
+manufacturer-only. A generator placed as a `satisfactory_building`
+therefore now echoes `clock_speed: 1` where it previously omitted the field.
+
+## Preview holograms (not yet live-verified)
+
+`POST /api/v1/preview` shows a would-be buildable as the game's own hologram
+and reports the hologram's placement verdict, so `terraform plan` can put the
+whole pending change in the world and turn clearance/overlap/node-snapping
+failures into plan warnings. Nothing is constructed and nothing is saved -
+holograms are transient actors, destroyed on expiry (`ttl_seconds`, default
+120, max 600), on `DELETE /preview[/{tf_id}]`, when a real spawn with the
+same `tf_id` replaces them, and when the session ends.
+
+How one is driven, mirroring one build-gun aim:
+
+- The build recipe comes from `AFGRecipeManager::FindBuildingDescriptorByClass`
+  + `FindRecipesByProduct(descriptor, onlyAvailable=false)`, with
+  `Recipe_<Name>_C` as the naming-convention fallback.
+- `AFGHologram::SpawnHologramFromRecipe(recipe, owner, location, instigator)`
+  with the local player's build gun as owner and their character as
+  instigator when there is a local player, the subsystem actor otherwise
+  (dedicated server). Some hologram classes assume their owner is a build
+  gun; which ones tolerate another owner is unknown until tried, so a null
+  hologram yields `valid: null` + `preview_unavailable` rather than an error.
+- A synthetic `FHitResult` at the requested point (hit actor = the node, for
+  extractors, so the extractor hologram's snap logic finds it), then
+  `SetScrollRotateValue(yaw)` → `PreHologramPlacement` →
+  `TrySnapToActor` or `SetHologramLocationAndRotation` →
+  `PostHologramPlacement`. Coordinate-placed classes are then forced to the
+  exact requested transform (the API does not snap, so the ghost should not
+  either). `CheckValidPlacement` is protected, reached through a
+  derived-class access shim rather than `ValidatePlacementAndCost`, which
+  would also run the build-cost check against an inventory and report "cannot
+  afford" as "cannot place". `CanConstruct()` and
+  `GetConstructDisqualifiers()` give the verdict; `SetPlacementMaterialState`
+  colours the ghost.
+
+Unknowns, in the order they will be hit live:
+
+1. Whether holograms spawned outside a build-gun state tick happily (they
+   are normally owned and ticked by `AFGBuildGunStateBuild`). If one crashes
+   in its Tick, the fix is probably `SetActorTickEnabled(false)` after the
+   check.
+2. Whether `SetScrollRotateValue` is in degrees (it is applied through the
+   hologram's own placement; the forced transform afterwards makes this
+   moot for coordinate-placed classes).
+3. Whether `CheckValidPlacement` on a hologram with no build-gun owner
+   produces the same disqualifiers the build gun shows.
+4. Whether a client in a multiplayer session sees the holograms
+   (replication is the hologram's own business; irrelevant for the
+   single-player target).

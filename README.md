@@ -117,6 +117,12 @@ drift.
       configuration
 - [ ] Fluid pipelines & hypertubes - implemented and compiling, **not yet
       verified in a live session** (see implementation notes)
+- [ ] Extractors on resource nodes / water: `GET /world/resource-nodes` and
+      `node_id` on `POST /buildables` - implemented and compiling, **not yet
+      verified in a live session** (see implementation notes)
+- [ ] Preview holograms (`/preview`): plan-time ghosts with the game's own
+      placement verdict - implemented and compiling, **not yet verified in a
+      live session** (see implementation notes)
 
 See [`CHANGELOG.md`](CHANGELOG.md) for the release history.
 

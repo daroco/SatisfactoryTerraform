@@ -28,6 +28,25 @@
 #include "Buildables/FGBuildableRailroadSignal.h"
 #include "Buildables/FGBuildableRailroadSwitchControl.h"
 #include "Buildables/FGBuildableResourceExtractorBase.h"
+#include "Buildables/FGBuildableGeneratorGeoThermal.h"
+#include "Resources/FGExtractableResourceInterface.h"
+#include "Resources/FGResourceNodeBase.h"
+#include "Resources/FGResourceNode.h"
+#include "Resources/FGResourceNodeFrackingCore.h"
+#include "Resources/FGResourceNodeFrackingSatellite.h"
+#include "Resources/FGResourceDescriptor.h"
+#include "Resources/FGResourceDescriptorGeyser.h"
+#include "Resources/FGBuildingDescriptor.h"
+#include "FGWaterVolume.h"
+#include "Hologram/FGHologram.h"
+#include "FGConstructDisqualifier.h"
+#include "Engine/ActorInstanceHandle.h"
+#include "Components/PrimitiveComponent.h"
+#include "FGRecipeManager.h"
+#include "FGCharacterPlayer.h"
+#include "Equipment/FGBuildGun.h"
+#include "EngineUtils.h"   // TActorIterator
+#include "TimerManager.h"
 #include "Buildables/FGBuildableSignBase.h"
 #include "Buildables/FGBuildableSplitterSmart.h"
 #include "Buildables/FGBuildableCircuitSwitch.h"
@@ -91,6 +110,58 @@ namespace
 		return Request.PathParams.FindRef(TEXT("tf_id"));
 	}
 
+	/** The node_id of an extractor: the actor path of the feature it is bound
+	  * to, i.e. exactly what GET /world/resource-nodes reports as id and what
+	  * POST /buildables took as node_id. Empty when unbound (an extractor that
+	  * lost its node, or one spawned without binding - which this API never
+	  * does, but a hand-built one can end up that way after a map change). */
+	FString ExtractorNodeID(const AFGBuildable* Buildable)
+	{
+		const AFGBuildableResourceExtractorBase* Extractor = Cast<AFGBuildableResourceExtractorBase>(Buildable);
+		if (!Extractor)
+		{
+			return FString();
+		}
+		// GetExtractableResourceActor is protected; the public accessor hands
+		// back the TScriptInterface whose object is that same actor.
+		const UObject* Resource = Extractor->GetExtractableResource().GetObject();
+		return Resource ? Resource->GetPathName() : FString();
+	}
+
+	/** recipe / clock_speed / node_id, with the same presence rules on every
+	  * read path (GET /buildables, POST response, GET /world/buildables):
+	  *
+	  * - recipe: manufacturers only (GetCurrentRecipe/SetRecipe live on
+	  *   AFGBuildableManufacturer - confirmed against the real header).
+	  * - clock_speed: any AFGBuildableFactory whose class can change
+	  *   potential (mCanChangePotential, read through the header-inline
+	  *   GetCanChangePotential) - that is manufacturers, extractors and
+	  *   generators. A splitter or a foundation has no clock and the field is
+	  *   omitted, so the provider can tell "no clock" from "clock 0".
+	  * - node_id: extractors that are bound to a feature. */
+	void AppendProductionFields(const TSharedPtr<FJsonObject>& Json, const AFGBuildable* Buildable)
+	{
+		if (const AFGBuildableManufacturer* Manufacturer = Cast<AFGBuildableManufacturer>(Buildable))
+		{
+			if (const TSubclassOf<UFGRecipe> Recipe = Manufacturer->GetCurrentRecipe())
+			{
+				Json->SetStringField(TEXT("recipe"), Recipe->GetName());
+			}
+		}
+		if (const AFGBuildableFactory* Factory = Cast<AFGBuildableFactory>(Buildable))
+		{
+			if (Factory->GetCanChangePotential())
+			{
+				Json->SetNumberField(TEXT("clock_speed"), Factory->GetPendingPotential());
+			}
+		}
+		const FString NodeID = ExtractorNodeID(Buildable);
+		if (!NodeID.IsEmpty())
+		{
+			Json->SetStringField(TEXT("node_id"), NodeID);
+		}
+	}
+
 	TSharedPtr<FJsonObject> BuildableToJson(const FString& TFID, const AFGBuildable* Buildable)
 	{
 		const TSharedPtr<FJsonObject> Json = MakeShared<FJsonObject>();
@@ -104,20 +175,7 @@ namespace
 		Transform->SetNumberField(TEXT("yaw"), Buildable->GetActorRotation().Yaw);
 		Json->SetObjectField(TEXT("transform"), Transform);
 
-		// Foundations/belts/etc. aren't production machines and have no
-		// recipe/clock_speed - the API contract makes both fields optional.
-		// GetCurrentRecipe/SetRecipe live on AFGBuildableManufacturer (which
-		// derives from AFGBuildableFactory, so GetPendingPotential is reached
-		// through the same cast) - confirmed against the real FactoryGame
-		// header, not AFGBuildableFactory itself.
-		if (const AFGBuildableManufacturer* Manufacturer = Cast<AFGBuildableManufacturer>(Buildable))
-		{
-			if (const TSubclassOf<UFGRecipe> Recipe = Manufacturer->GetCurrentRecipe())
-			{
-				Json->SetStringField(TEXT("recipe"), Recipe->GetName());
-			}
-			Json->SetNumberField(TEXT("clock_speed"), Manufacturer->GetPendingPotential());
-		}
+		AppendProductionFields(Json, Buildable);
 		return Json;
 	}
 
@@ -313,6 +371,11 @@ void ASTFApiServerSubsystem::BeginPlay()
 	ActiveInstance = this;
 	BindRoutesOnce();
 	Module.StartAllListeners();
+
+	// Preview holograms are transient and time-limited (see HandlePreview);
+	// a once-a-second sweep removes the expired ones. Coarse on purpose - a
+	// TTL is a cleanup guarantee, not a precise schedule.
+	GetWorldTimerManager().SetTimer(PreviewExpiryTimer, this, &ASTFApiServerSubsystem::PurgeExpiredPreviews, 1.0f, /*bLoop*/ true);
 	UE_LOG(LogSatisfactoryTerraform, Log,
 		TEXT("SatisfactoryTerraform API listening on 127.0.0.1:%d (loopback only; host-allowlist + CSRF guards active; %s)"),
 		Port, Token.IsEmpty() ? TEXT("no auth token set") : TEXT("bearer token required"));
@@ -328,6 +391,8 @@ void ASTFApiServerSubsystem::EndPlay(const EEndPlayReason::Type Reason)
 	{
 		ActiveInstance = nullptr;
 	}
+	GetWorldTimerManager().ClearTimer(PreviewExpiryTimer);
+	RemoveAllPreviews();
 	Super::EndPlay(Reason);
 }
 
@@ -365,6 +430,11 @@ void ASTFApiServerSubsystem::BindRoutesOnce()
 	Bind(TEXT("/api/v1/world"), EHttpServerRequestVerbs::VERB_GET, &ASTFApiServerSubsystem::HandleWorld);
 	Bind(TEXT("/api/v1/players"), EHttpServerRequestVerbs::VERB_GET, &ASTFApiServerSubsystem::HandlePlayers);
 	Bind(TEXT("/api/v1/world/buildables"), EHttpServerRequestVerbs::VERB_GET, &ASTFApiServerSubsystem::HandleWorldBuildables);
+	Bind(TEXT("/api/v1/world/resource-nodes"), EHttpServerRequestVerbs::VERB_GET, &ASTFApiServerSubsystem::HandleWorldResourceNodes);
+	Bind(TEXT("/api/v1/preview"),
+		EHttpServerRequestVerbs::VERB_GET | EHttpServerRequestVerbs::VERB_POST | EHttpServerRequestVerbs::VERB_DELETE,
+		&ASTFApiServerSubsystem::HandlePreview);
+	Bind(TEXT("/api/v1/preview/:tf_id"), EHttpServerRequestVerbs::VERB_DELETE, &ASTFApiServerSubsystem::HandlePreviewByID);
 	Bind(TEXT("/api/v1/classes"), EHttpServerRequestVerbs::VERB_GET, &ASTFApiServerSubsystem::HandleClassCatalog);
 	Bind(TEXT("/api/v1/classes/:class"), EHttpServerRequestVerbs::VERB_GET, &ASTFApiServerSubsystem::HandleBuildableClass);
 	Bind(TEXT("/api/v1/buildables"),
@@ -595,11 +665,24 @@ bool ASTFApiServerSubsystem::HandleClassCatalog(const FHttpServerRequest& Reques
 				Resource = TEXT("");
 				Why = TEXT("routed along a path rather than placed at a point, and not one of the connection kinds the provider knows");
 			}
-			else if (Class->IsChildOf(AFGBuildableResourceExtractorBase::StaticClass()))
+			else if (Class->IsChildOf(AFGBuildableGeneratorGeoThermal::StaticClass()))
 			{
+				// Sits on a geyser like an extractor does, but it is a
+				// generator, not an AFGBuildableResourceExtractorBase, so the
+				// node-binding path below does not reach it. Called out
+				// explicitly so it does not fall through to "building" and
+				// get placed on nothing.
 				Mechanism = TEXT("node_bound");
 				Resource = TEXT("");
-				Why = TEXT("placed on a resource node or geyser, not at a coordinate; needs a way to discover and reference world features");
+				Why = TEXT("a generator bound to a geyser; not an extractor, and not modelled yet");
+			}
+			else if (Class->IsChildOf(AFGBuildableResourceExtractorBase::StaticClass()))
+			{
+				// Miners, water extractors, oil extractors, fracking: placed
+				// ON a world feature found via GET /world/resource-nodes and
+				// referenced by node_id, not at a coordinate.
+				Mechanism = TEXT("node_bound");
+				Resource = TEXT("satisfactory_extractor");
 			}
 			else if (Class->IsChildOf(AFGBuildableRailroadStation::StaticClass()) || Class->IsChildOf(AFGBuildableTrainPlatform::StaticClass()) ||
 				Class->IsChildOf(AFGBuildableRailroadSignal::StaticClass()) || Class->IsChildOf(AFGBuildableRailroadSwitchControl::StaticClass()))
@@ -987,13 +1070,9 @@ bool ASTFApiServerSubsystem::HandleWorldBuildables(const FHttpServerRequest& Req
 		T->SetNumberField(TEXT("yaw"), It.Transform.Rotator().Yaw);
 		Json->SetObjectField(TEXT("transform"), T);
 
-		if (const AFGBuildableManufacturer* Manufacturer = Cast<AFGBuildableManufacturer>(It.Actor))
+		if (It.Actor)
 		{
-			if (const TSubclassOf<UFGRecipe> Recipe = Manufacturer->GetCurrentRecipe())
-			{
-				Json->SetStringField(TEXT("recipe"), Recipe->GetName());
-			}
-			Json->SetNumberField(TEXT("clock_speed"), Manufacturer->GetPendingPotential());
+			AppendProductionFields(Json, It.Actor);
 		}
 
 		// A belt or wire is defined by what it joins, not by where it sits.
@@ -1136,6 +1215,19 @@ bool ASTFApiServerSubsystem::HandleBuildableByID(const FHttpServerRequest& Reque
 		// DELETE — dismantle through IFGDismantleInterface when the buildable
 		// implements it (refunds + connection cleanup match vanilla
 		// behaviour), falling back to a plain Destroy() otherwise.
+		//
+		// An extractor also frees its node first. The game's own dismantle
+		// most likely does this too (Destroyed() -> DisconnectExtractableResource
+		// is in the header), but that body is stub-only locally, and a node
+		// left marked occupied is a node no extractor - ours or the player's -
+		// can ever use again. Setting it false twice costs nothing.
+		if (const AFGBuildableResourceExtractorBase* Extractor = Cast<AFGBuildableResourceExtractorBase>(Buildable))
+		{
+			if (IFGExtractableResourceInterface* Resource = Extractor->GetExtractableResource().GetInterface())
+			{
+				Resource->SetIsOccupied(false);
+			}
+		}
 		Registry->Unregister(TFID);
 		DismantleBuildable(Buildable);
 		auto Response = FHttpServerResponse::Create(TEXT(""), TEXT("application/json"));
@@ -1403,8 +1495,13 @@ void ASTFApiServerSubsystem::DismantleBuildable(AFGBuildable* Buildable) const
 
 TSharedPtr<FJsonObject> ASTFApiServerSubsystem::PatchBuildable(AFGBuildable* Buildable, const TSharedPtr<FJsonObject>& Body, const FString& TFID, int32& OutStatus, FString& OutError)
 {
+	// Two independent capabilities: a recipe (manufacturers only) and a clock
+	// (anything whose class can change potential - manufacturers, extractors,
+	// generators). A buildable with neither has nothing to patch.
 	AFGBuildableManufacturer* Manufacturer = Cast<AFGBuildableManufacturer>(Buildable);
-	if (!Manufacturer)
+	AFGBuildableFactory* Factory = Cast<AFGBuildableFactory>(Buildable);
+	const bool bHasClock = Factory && Factory->GetCanChangePotential();
+	if (!Manufacturer && !bHasClock)
 	{
 		OutStatus = 422;
 		OutError = TEXT("this buildable has no recipe/clock_speed to patch");
@@ -1414,6 +1511,12 @@ TSharedPtr<FJsonObject> ASTFApiServerSubsystem::PatchBuildable(AFGBuildable* Bui
 	FString RecipeClassName;
 	if (Body->TryGetStringField(TEXT("recipe"), RecipeClassName) && !RecipeClassName.IsEmpty())
 	{
+		if (!Manufacturer)
+		{
+			OutStatus = 422;
+			OutError = TEXT("this buildable has no recipe to patch");
+			return nullptr;
+		}
 		UClass* RecipeClass = ResolveRecipeClass(RecipeClassName, OutError);
 		if (!RecipeClass)
 		{
@@ -1440,7 +1543,13 @@ TSharedPtr<FJsonObject> ASTFApiServerSubsystem::PatchBuildable(AFGBuildable* Bui
 			OutError = TEXT("clock_speed must be between 0.01 and 2.5");
 			return nullptr;
 		}
-		Manufacturer->SetPendingPotential(ClockSpeed);
+		if (!bHasClock)
+		{
+			OutStatus = 422;
+			OutError = TEXT("this buildable has no clock_speed to patch");
+			return nullptr;
+		}
+		Factory->SetPendingPotential(ClockSpeed);
 	}
 
 	return BuildableToJson(TFID, Buildable);
@@ -1503,20 +1612,19 @@ TSharedPtr<FJsonObject> ASTFApiServerSubsystem::SpawnBuildable(const TSharedPtr<
 		return nullptr;
 	}
 
-	const TSharedPtr<FJsonObject>* TransformJson = nullptr;
-	if (!Body->TryGetObjectField(TEXT("transform"), TransformJson))
+	// Where it goes: a transform for ordinary classes, a world feature (plus
+	// the transform the feature dictates) for extractors. Same resolver the
+	// preview uses, so the two never disagree about what is a valid request.
+	FResolvedPlacement Placement;
+	if (!ResolvePlacement(Class, Body, /*bCheckOccupied*/ true, Placement, OutStatus, OutError))
 	{
-		OutStatus = 422;
-		OutError = TEXT("transform is required");
 		return nullptr;
 	}
-	const FVector Location(
-		(*TransformJson)->GetNumberField(TEXT("x")),
-		(*TransformJson)->GetNumberField(TEXT("y")),
-		(*TransformJson)->GetNumberField(TEXT("z")));
-	double Yaw = 0;
-	(*TransformJson)->TryGetNumberField(TEXT("yaw"), Yaw);
-	const FTransform Transform(FRotator(0, Yaw, 0), Location);
+	const FTransform& Transform = Placement.Transform;
+
+	// A standing preview hologram for this tf_id is the ghost of exactly this
+	// buildable; the real thing replaces it (see HandlePreview).
+	RemovePreview(TFID);
 
 	// Spawn through the buildable subsystem so the buildable ticks in the
 	// factory tick group like a hologram-built one would.
@@ -1535,7 +1643,32 @@ TSharedPtr<FJsonObject> ASTFApiServerSubsystem::SpawnBuildable(const TSharedPtr<
 		return nullptr;
 	}
 
+	// Extractors learn their node BEFORE FinishSpawning, mirroring the
+	// hologram: AFGResourceExtractorHologram::ConfigureActor runs on the
+	// deferred-spawned actor and sets the extractable resource, and only then
+	// does BeginPlay (inside FinishSpawning) see a bound extractor. Binding
+	// afterwards would leave BeginPlay's own setup - whatever of it keys off
+	// the resource - already done with a null node.
+	TScriptInterface<IFGExtractableResourceInterface> Resource;
+	if (Placement.ResourceActor)
+	{
+		Resource = TScriptInterface<IFGExtractableResourceInterface>(Placement.ResourceActor);
+		if (AFGBuildableResourceExtractorBase* Extractor = Cast<AFGBuildableResourceExtractorBase>(Buildable))
+		{
+			Extractor->SetExtractableResource(Resource);
+		}
+	}
+
 	Buildable->FinishSpawning(Transform);
+
+	// The node is the game's one-extractor-per-feature lock. The real
+	// BeginPlay very probably marks it (the hologram flow relies on that), but
+	// that body is stub-only locally - so mark it here if it isn't, which is a
+	// no-op when the game already did.
+	if (Resource && !Resource->IsOccupied() && Resource->CanBecomeOccupied())
+	{
+		Resource->SetIsOccupied(true);
+	}
 
 	// Recipe/clock_speed applied AFTER FinishSpawning, not between
 	// BeginSpawnBuildable/FinishSpawning: mCurrentRecipe is a Replicated
@@ -1550,7 +1683,15 @@ TSharedPtr<FJsonObject> ASTFApiServerSubsystem::SpawnBuildable(const TSharedPtr<
 		{
 			Manufacturer->SetRecipe(RecipeClass);
 		}
-		Manufacturer->SetPendingPotential(ClockSpeed);
+	}
+	// Clock on anything that has one (manufacturer, extractor, generator) -
+	// the same predicate AppendProductionFields reports it by.
+	if (AFGBuildableFactory* Factory = Cast<AFGBuildableFactory>(Buildable))
+	{
+		if (Factory->GetCanChangePotential())
+		{
+			Factory->SetPendingPotential(ClockSpeed);
+		}
 	}
 
 	// Simple structural buildables (foundations, walls, ramps, ...) are
@@ -1874,4 +2015,803 @@ TSharedPtr<FJsonObject> ASTFApiServerSubsystem::SpawnConnection(const TSharedPtr
 	UE_LOG(LogSatisfactoryTerraform, Log, TEXT("Connected %s as %s"), *Class->GetName(), *TFID);
 	OutStatus = 201;
 	return ConnectionToJson(TFID, Class->GetName(), Endpoints);
+}
+
+// ---------------------------------------------------------------------------
+// Resource nodes and node-bound placement (extractors)
+// ---------------------------------------------------------------------------
+
+namespace
+{
+	const TCHAR* PurityName(EResourcePurity Purity)
+	{
+		switch (Purity)
+		{
+		case RP_Inpure: return TEXT("impure");
+		case RP_Normal: return TEXT("normal");
+		case RP_Pure:   return TEXT("pure");
+		default:        return TEXT("");
+		}
+	}
+
+	const TCHAR* FormName(EResourceForm Form)
+	{
+		switch (Form)
+		{
+		case EResourceForm::RF_SOLID:  return TEXT("solid");
+		case EResourceForm::RF_LIQUID: return TEXT("liquid");
+		case EResourceForm::RF_GAS:    return TEXT("gas");
+		default:                       return TEXT("");
+		}
+	}
+
+	/** The wire "type" of a node actor. Not a closed set, per the contract. */
+	const TCHAR* NodeTypeName(const AFGResourceNodeBase* Node)
+	{
+		if (Node->IsA<AFGResourceNodeFrackingCore>())
+		{
+			return TEXT("fracking");
+		}
+		if (Node->IsA<AFGResourceNodeFrackingSatellite>())
+		{
+			return TEXT("fracking_satellite");
+		}
+		if (Node->GetResourceNodeType() == EResourceNodeType::Geyser)
+		{
+			return TEXT("geyser");
+		}
+		if (const TSubclassOf<UFGResourceDescriptor> Resource = Node->GetResourceClass())
+		{
+			if (Resource->IsChildOf(UFGResourceDescriptorGeyser::StaticClass()))
+			{
+				return TEXT("geyser");
+			}
+		}
+		return TEXT("node");
+	}
+
+	/** Where an extractor goes when placed on Resource. The feature decides
+	  * (that is what GetPlacementLocation/Rotation are for - the hologram asks
+	  * the same thing), with the aim point as the fallback for a feature that
+	  * answers zero. Hit is the point the "build gun" is aiming at: the node
+	  * itself for nodes, a chosen surface point for water. */
+	FTransform PlacementOn(IFGExtractableResourceInterface* Resource, const FVector& Hit)
+	{
+		FVector Loc = Resource->GetPlacementLocation(Hit);
+		if (Loc.IsNearlyZero())
+		{
+			Loc = Hit;
+		}
+		const FRotator Rot = Resource->GetPlacementRotation(Hit);
+		return FTransform(Rot, Loc);
+	}
+
+	/** Surface box of a water volume; x/y centre + Max.Z is the default pump spot. */
+	FBox WaterBounds(const AFGWaterVolume* Water)
+	{
+		return Water->GetComponentsBoundingBox(/*bNonColliding*/ true);
+	}
+
+	TSharedPtr<FJsonObject> Vec3Json(const FVector& V)
+	{
+		const TSharedPtr<FJsonObject> Json = MakeShared<FJsonObject>();
+		Json->SetNumberField(TEXT("x"), V.X);
+		Json->SetNumberField(TEXT("y"), V.Y);
+		Json->SetNumberField(TEXT("z"), V.Z);
+		return Json;
+	}
+
+	TUniquePtr<FHttpServerResponse> NoContentResponse()
+	{
+		auto Response = FHttpServerResponse::Create(TEXT(""), TEXT("application/json"));
+		Response->Code = EHttpServerResponseCodes::NoContent;
+		return Response;
+	}
+
+	TUniquePtr<FHttpServerResponse> ArrayResponse(const TArray<TSharedPtr<FJsonValue>>& Items)
+	{
+		FString Body;
+		const auto Writer = TJsonWriterFactory<>::Create(&Body);
+		FJsonSerializer::Serialize(Items, Writer);
+		auto Response = FHttpServerResponse::Create(Body, TEXT("application/json"));
+		Response->Code = EHttpServerResponseCodes::Ok;
+		return Response;
+	}
+}
+
+AActor* ASTFApiServerSubsystem::ResolveExtractableResource(const FString& Path, FString& OutError) const
+{
+	// node_id is the actor's full path name, which is what
+	// GET /world/resource-nodes hands out, so a direct object lookup is the
+	// normal case. The iterators are the fallback for a path FindObject does
+	// not resolve (an actor that moved package, a sublevel the lookup cannot
+	// see through) - bounded cost, since only node/water actors are visited.
+	AActor* Actor = Path.IsEmpty() ? nullptr : FindObject<AActor>(nullptr, *Path);
+	if (!Actor)
+	{
+		for (TActorIterator<AFGResourceNodeBase> It(GetWorld()); It && !Actor; ++It)
+		{
+			if (It->GetPathName() == Path)
+			{
+				Actor = *It;
+			}
+		}
+		for (TActorIterator<AFGWaterVolume> It(GetWorld()); It && !Actor; ++It)
+		{
+			if (It->GetPathName() == Path)
+			{
+				Actor = *It;
+			}
+		}
+	}
+	if (!Actor || !Cast<IFGExtractableResourceInterface>(Actor))
+	{
+		OutError = FString::Printf(TEXT("unknown node_id %s (see GET /world/resource-nodes)"), *Path);
+		return nullptr;
+	}
+	return Actor;
+}
+
+bool ASTFApiServerSubsystem::ResolvePlacement(UClass* Class, const TSharedPtr<FJsonObject>& Body, bool bCheckOccupied,
+	FResolvedPlacement& Out, int32& OutStatus, FString& OutError) const
+{
+	const bool bIsExtractor = Class->IsChildOf(AFGBuildableResourceExtractorBase::StaticClass());
+	FString NodeID;
+	Body->TryGetStringField(TEXT("node_id"), NodeID);
+
+	// The two modes are mutually exclusive, and both mistakes are worth
+	// refusing: an extractor spawned at a coordinate stands on nothing and
+	// never produces (the catalog used to call that "something broken"), and
+	// a node_id on a constructor is a config error nothing downstream would
+	// ever surface.
+	if (bIsExtractor && NodeID.IsEmpty())
+	{
+		OutStatus = 422;
+		OutError = TEXT("extractor classes must be placed on a node: set node_id (see GET /world/resource-nodes)");
+		return false;
+	}
+	if (!bIsExtractor && !NodeID.IsEmpty())
+	{
+		OutStatus = 422;
+		OutError = FString::Printf(TEXT("%s is placed at a transform, not on a node: remove node_id"), *Class->GetName());
+		return false;
+	}
+
+	if (!bIsExtractor)
+	{
+		const TSharedPtr<FJsonObject>* TransformJson = nullptr;
+		if (!Body->TryGetObjectField(TEXT("transform"), TransformJson))
+		{
+			OutStatus = 422;
+			OutError = TEXT("transform is required");
+			return false;
+		}
+		const FVector Location(
+			(*TransformJson)->GetNumberField(TEXT("x")),
+			(*TransformJson)->GetNumberField(TEXT("y")),
+			(*TransformJson)->GetNumberField(TEXT("z")));
+		double Yaw = 0;
+		(*TransformJson)->TryGetNumberField(TEXT("yaw"), Yaw);
+		Out.Transform = FTransform(FRotator(0, Yaw, 0), Location);
+		return true;
+	}
+
+	AActor* ResourceActor = ResolveExtractableResource(NodeID, OutError);
+	if (!ResourceActor)
+	{
+		OutStatus = 422;
+		return false;
+	}
+	IFGExtractableResourceInterface* Resource = Cast<IFGExtractableResourceInterface>(ResourceActor);
+
+	// One extractor per feature is the game's rule (and the hologram's
+	// disqualifier); a water volume reports CanBecomeOccupied false and takes
+	// any number of pumps.
+	if (bCheckOccupied && Resource->IsOccupied())
+	{
+		OutStatus = 409;
+		OutError = FString::Printf(TEXT("node %s is already occupied by another extractor"), *NodeID);
+		return false;
+	}
+
+	// Form / allowed-resource / node-type compatibility, asked of the class
+	// default object through the same public predicate the hologram uses
+	// (AFGBuildableResourceExtractorBase::IsAllowedOnResource - "can this
+	// extractor occupy this, given it is free"). Real compiled game code; the
+	// local body is a stub, so this is not inspectable but is exactly the
+	// vanilla rule rather than a re-implementation of it.
+	const TScriptInterface<IFGExtractableResourceInterface> ScriptResource(ResourceActor);
+	if (const AFGBuildableResourceExtractorBase* CDO = Class->GetDefaultObject<AFGBuildableResourceExtractorBase>())
+	{
+		if (!CDO->IsAllowedOnResource(ScriptResource))
+		{
+			const TSubclassOf<UFGResourceDescriptor> ResourceClass = Resource->GetResourceClass();
+			OutStatus = 422;
+			OutError = FString::Printf(TEXT("%s cannot extract %s (node %s)"), *Class->GetName(),
+				ResourceClass ? *ResourceClass->GetName() : TEXT("that resource"), *NodeID);
+			return false;
+		}
+	}
+
+	// Placement overrides: yaw for anything, a surface point for water.
+	const TSharedPtr<FJsonObject>* PlacementJson = nullptr;
+	Body->TryGetObjectField(TEXT("placement"), PlacementJson);
+
+	FVector Hit = ResourceActor->GetActorLocation();
+	if (const AFGWaterVolume* Water = Cast<AFGWaterVolume>(ResourceActor))
+	{
+		// A lake is an area, so "on the node" needs a point: the caller's x/y
+		// if given, the centre otherwise, always at the surface. Outside the
+		// box is refused rather than clamped - a pump 200m from where the
+		// config said is a surprise, a 422 is a fix.
+		const FBox Bounds = WaterBounds(Water);
+		Hit = Bounds.GetCenter();
+		Hit.Z = Bounds.Max.Z;
+		if (PlacementJson)
+		{
+			double X = 0, Y = 0;
+			if ((*PlacementJson)->TryGetNumberField(TEXT("x"), X))
+			{
+				Hit.X = X;
+			}
+			if ((*PlacementJson)->TryGetNumberField(TEXT("y"), Y))
+			{
+				Hit.Y = Y;
+			}
+		}
+		if (Hit.X < Bounds.Min.X || Hit.X > Bounds.Max.X || Hit.Y < Bounds.Min.Y || Hit.Y > Bounds.Max.Y)
+		{
+			OutStatus = 422;
+			OutError = FString::Printf(TEXT("placement (%.0f, %.0f) is outside water volume %s (x %.0f..%.0f, y %.0f..%.0f)"),
+				Hit.X, Hit.Y, *NodeID, Bounds.Min.X, Bounds.Max.X, Bounds.Min.Y, Bounds.Max.Y);
+			return false;
+		}
+	}
+
+	Out.Transform = PlacementOn(Resource, Hit);
+	if (PlacementJson)
+	{
+		double Yaw = 0;
+		if ((*PlacementJson)->TryGetNumberField(TEXT("yaw"), Yaw))
+		{
+			FRotator Rot = Out.Transform.Rotator();
+			Rot.Yaw = Yaw;
+			Out.Transform.SetRotation(Rot.Quaternion());
+		}
+	}
+	Out.ResourceActor = ResourceActor;
+	Out.NodeID = NodeID;
+	return true;
+}
+
+bool ASTFApiServerSubsystem::HandleWorldResourceNodes(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete)
+{
+	if (!CheckRequest(Request, OnComplete))
+	{
+		return true;
+	}
+
+	// Filters. x/y/z travel together; radius needs them; purity is an enum.
+	FString ResourceFilter, PurityFilter;
+	if (const FString* Raw = Request.QueryParams.Find(TEXT("resource")))
+	{
+		ResourceFilter = *Raw;
+	}
+	if (const FString* Raw = Request.QueryParams.Find(TEXT("purity")))
+	{
+		PurityFilter = *Raw;
+		if (PurityFilter != TEXT("impure") && PurityFilter != TEXT("normal") && PurityFilter != TEXT("pure"))
+		{
+			OnComplete(ErrorResponse(422, TEXT("purity must be one of impure, normal, pure")));
+			return true;
+		}
+	}
+	double CenterX = 0, CenterY = 0, CenterZ = 0, Radius = 0;
+	const auto Param = [&Request](const TCHAR* Key, double& Out)
+	{
+		if (const FString* Raw = Request.QueryParams.Find(Key))
+		{
+			Out = FCString::Atod(**Raw);
+			return true;
+		}
+		return false;
+	};
+	const bool bHasX = Param(TEXT("x"), CenterX);
+	const bool bHasY = Param(TEXT("y"), CenterY);
+	const bool bHasZ = Param(TEXT("z"), CenterZ);
+	const bool bHasCenter = bHasX && bHasY && bHasZ;
+	if ((bHasX || bHasY || bHasZ) && !bHasCenter)
+	{
+		OnComplete(ErrorResponse(422, TEXT("x, y and z must be given together")));
+		return true;
+	}
+	const bool bHasRadius = Param(TEXT("radius"), Radius);
+	if (bHasRadius && !bHasCenter)
+	{
+		OnComplete(ErrorResponse(422, TEXT("radius requires x, y and z")));
+		return true;
+	}
+	if (bHasRadius && Radius <= 0)
+	{
+		OnComplete(ErrorResponse(422, TEXT("radius must be positive")));
+		return true;
+	}
+	bool bIncludeOccupied = false;
+	if (const FString* Raw = Request.QueryParams.Find(TEXT("include_occupied")))
+	{
+		bIncludeOccupied = Raw->Equals(TEXT("true"), ESearchCase::IgnoreCase) || *Raw == TEXT("1");
+	}
+	const FVector Center(CenterX, CenterY, CenterZ);
+
+	// Which features our own extractors sit on, so a config can keep choosing
+	// the nodes it already owns (occupant_tf_id) instead of seeing them vanish
+	// from a free-nodes-only listing after the first apply.
+	TMap<FString, FString> OccupantByNodePath;
+	if (ASTFRegistrySubsystem* Registry = ASTFRegistrySubsystem::Get(GetWorld()))
+	{
+		for (const ASTFRegistrySubsystem::FEntry& Entry : Registry->GetAll())
+		{
+			const FString NodeID = Entry.Buildable ? ExtractorNodeID(Entry.Buildable) : FString();
+			if (!NodeID.IsEmpty())
+			{
+				OccupantByNodePath.Add(NodeID, Entry.TFID);
+			}
+		}
+	}
+
+	struct FNodeEntry
+	{
+		FString ID, Resource, Purity, Form, Type, OccupantTFID;
+		bool bOccupied = false;
+		FVector Location = FVector::ZeroVector;
+		double Yaw = 0;
+		bool bHasBounds = false;
+		FBox Bounds = FBox(ForceInit);
+		double DistSq = 0;
+	};
+	TArray<FNodeEntry> Entries;
+
+	const auto Keep = [&](FNodeEntry& E)
+	{
+		if (!ResourceFilter.IsEmpty() && E.Resource != ResourceFilter)
+		{
+			return;
+		}
+		if (!PurityFilter.IsEmpty() && E.Purity != PurityFilter)
+		{
+			return;
+		}
+		if (!bIncludeOccupied && E.bOccupied)
+		{
+			return;
+		}
+		if (bHasCenter)
+		{
+			E.DistSq = FVector::DistSquared(E.Location, Center);
+			if (bHasRadius && E.DistSq > Radius * Radius)
+			{
+				return;
+			}
+		}
+		E.OccupantTFID = OccupantByNodePath.FindRef(E.ID);
+		Entries.Add(MoveTemp(E));
+	};
+
+	// Nodes (ore, geysers, fracking). Deposits are the small pickable rocks,
+	// not something an extractor binds to. Plain actor iteration: the node
+	// manager keeps its lists private and its accessor is stub-only.
+	for (TActorIterator<AFGResourceNodeBase> It(GetWorld()); It; ++It)
+	{
+		AFGResourceNodeBase* Node = *It;
+		if (!Node || Node->GetResourceNodeType() == EResourceNodeType::Deposit)
+		{
+			continue;
+		}
+		const TSubclassOf<UFGResourceDescriptor> ResourceClass = Node->GetResourceClass();
+		if (!ResourceClass)
+		{
+			continue;
+		}
+		FNodeEntry E;
+		E.ID = Node->GetPathName();
+		E.Resource = ResourceClass->GetName();
+		if (const AFGResourceNode* Typed = Cast<AFGResourceNode>(Node))
+		{
+			E.Purity = PurityName(Typed->GetResourcePurity());
+		}
+		E.Type = NodeTypeName(Node);
+		// The game's EResourceForm has no "heat"; a geyser is the only feature
+		// without a solid/liquid/gas form, so name it for what it yields.
+		E.Form = E.Type == TEXT("geyser") ? FString(TEXT("heat")) : FString(FormName(Node->GetResourceForm()));
+		E.bOccupied = Node->IsOccupied();
+		const FTransform Placement = PlacementOn(Node, Node->GetActorLocation());
+		E.Location = Placement.GetLocation();
+		E.Yaw = Placement.Rotator().Yaw;
+		Keep(E);
+	}
+
+	// Water volumes: an area, reported at its centre/surface with its box so
+	// a config can spread several pumps along it.
+	for (TActorIterator<AFGWaterVolume> It(GetWorld()); It; ++It)
+	{
+		AFGWaterVolume* Water = *It;
+		if (!Water || !Water->CanPlaceResourceExtractor())
+		{
+			continue;
+		}
+		const TSubclassOf<UFGResourceDescriptor> ResourceClass = Water->GetResourceClass();
+		if (!ResourceClass)
+		{
+			continue;
+		}
+		FNodeEntry E;
+		E.ID = Water->GetPathName();
+		E.Resource = ResourceClass->GetName();
+		E.Form = TEXT("liquid");
+		E.Type = TEXT("water");
+		E.bOccupied = Water->IsOccupied();
+		E.bHasBounds = true;
+		E.Bounds = WaterBounds(Water);
+		E.Location = E.Bounds.GetCenter();
+		E.Location.Z = E.Bounds.Max.Z;
+		E.Yaw = 0;
+		Keep(E);
+	}
+
+	// Ordering is contractual: nearest first when a centre is given, else by
+	// id - a config that takes "the first free iron node" depends on it.
+	Entries.Sort([bHasCenter](const FNodeEntry& A, const FNodeEntry& B)
+	{
+		if (bHasCenter && A.DistSq != B.DistSq)
+		{
+			return A.DistSq < B.DistSq;
+		}
+		return A.ID < B.ID;
+	});
+
+	TArray<TSharedPtr<FJsonValue>> Out;
+	for (const FNodeEntry& E : Entries)
+	{
+		const TSharedPtr<FJsonObject> Json = MakeShared<FJsonObject>();
+		Json->SetStringField(TEXT("id"), E.ID);
+		Json->SetStringField(TEXT("resource"), E.Resource);
+		Json->SetStringField(TEXT("purity"), E.Purity);
+		Json->SetStringField(TEXT("form"), E.Form);
+		Json->SetStringField(TEXT("type"), E.Type);
+		Json->SetBoolField(TEXT("occupied"), E.bOccupied);
+		if (!E.OccupantTFID.IsEmpty())
+		{
+			Json->SetStringField(TEXT("occupant_tf_id"), E.OccupantTFID);
+		}
+		Json->SetNumberField(TEXT("x"), E.Location.X);
+		Json->SetNumberField(TEXT("y"), E.Location.Y);
+		Json->SetNumberField(TEXT("z"), E.Location.Z);
+		Json->SetNumberField(TEXT("yaw"), E.Yaw);
+		if (E.bHasBounds)
+		{
+			Json->SetObjectField(TEXT("bounds_min"), Vec3Json(E.Bounds.Min));
+			Json->SetObjectField(TEXT("bounds_max"), Vec3Json(E.Bounds.Max));
+		}
+		Out.Add(MakeShared<FJsonValueObject>(Json));
+	}
+	OnComplete(ArrayResponse(Out));
+	return true;
+}
+
+// ---------------------------------------------------------------------------
+// Preview holograms
+// ---------------------------------------------------------------------------
+
+namespace
+{
+	/** CheckValidPlacement is protected on AFGHologram (the build gun reaches
+	  * it through ValidatePlacementAndCost, which also runs the cost check
+	  * against a player inventory - not wanted here: a preview is about
+	  * geometry, and "cannot afford it" would read as "cannot place it").
+	  * This is the usual derived-class access shim: no instances, no state. */
+	struct FHologramPlacementAccess : public AFGHologram
+	{
+		void RunCheckValidPlacement() { CheckValidPlacement(); }
+	};
+
+	void CheckHologramPlacement(AFGHologram* Hologram)
+	{
+		static_cast<FHologramPlacementAccess*>(Hologram)->RunCheckValidPlacement();
+	}
+
+	TArray<TSharedPtr<FJsonValue>> DisqualifierNames(const AFGHologram* Hologram)
+	{
+		TArray<TSubclassOf<UFGConstructDisqualifier>> Disqualifiers;
+		Hologram->GetConstructDisqualifiers(Disqualifiers);
+		TArray<TSharedPtr<FJsonValue>> Out;
+		for (const TSubclassOf<UFGConstructDisqualifier>& D : Disqualifiers)
+		{
+			if (D)
+			{
+				Out.Add(MakeShared<FJsonValueString>(D->GetName()));
+			}
+		}
+		return Out;
+	}
+
+	/** PreviewResult for a standing hologram. */
+	TSharedPtr<FJsonObject> PreviewToJson(const FString& Key, const FSTFPreview& Preview)
+	{
+		const TSharedPtr<FJsonObject> Json = MakeShared<FJsonObject>();
+		Json->SetStringField(TEXT("tf_id"), Key);
+		Json->SetStringField(TEXT("class"), Preview.Class);
+		if (const AFGHologram* Hologram = Preview.Hologram.Get())
+		{
+			Json->SetBoolField(TEXT("valid"), Hologram->CanConstruct());
+			Json->SetArrayField(TEXT("disqualifiers"), DisqualifierNames(Hologram));
+			const FVector Loc = Hologram->GetActorLocation();
+			Json->SetNumberField(TEXT("x"), Loc.X);
+			Json->SetNumberField(TEXT("y"), Loc.Y);
+			Json->SetNumberField(TEXT("z"), Loc.Z);
+			Json->SetNumberField(TEXT("yaw"), Hologram->GetActorRotation().Yaw);
+		}
+		Json->SetNumberField(TEXT("expires_in"), FMath::Max(0.0, FMath::CeilToDouble(Preview.ExpiresAt - FPlatformTime::Seconds())));
+		return Json;
+	}
+}
+
+void ASTFApiServerSubsystem::RemovePreview(const FString& Key)
+{
+	FSTFPreview Preview;
+	if (Previews.RemoveAndCopyValue(Key, Preview))
+	{
+		if (AFGHologram* Hologram = Preview.Hologram.Get())
+		{
+			Hologram->Destroy();
+		}
+	}
+}
+
+void ASTFApiServerSubsystem::RemoveAllPreviews()
+{
+	for (auto& Pair : Previews)
+	{
+		if (AFGHologram* Hologram = Pair.Value.Hologram.Get())
+		{
+			Hologram->Destroy();
+		}
+	}
+	Previews.Empty();
+}
+
+void ASTFApiServerSubsystem::PurgeExpiredPreviews()
+{
+	const double Now = FPlatformTime::Seconds();
+	TArray<FString> Expired;
+	for (const auto& Pair : Previews)
+	{
+		// A hologram the game removed on its own (level change, dismantle-all)
+		// is just a dead entry; drop it along with the timed-out ones.
+		if (Pair.Value.ExpiresAt <= Now || !Pair.Value.Hologram.IsValid())
+		{
+			Expired.Add(Pair.Key);
+		}
+	}
+	for (const FString& Key : Expired)
+	{
+		RemovePreview(Key);
+	}
+}
+
+TSharedPtr<FJsonObject> ASTFApiServerSubsystem::SpawnPreview(const TSharedPtr<FJsonObject>& Body, int32& OutStatus, FString& OutError)
+{
+	const FString Key = Body->GetStringField(TEXT("tf_id"));
+	if (Key.IsEmpty())
+	{
+		OutStatus = 422;
+		OutError = TEXT("tf_id is required");
+		return nullptr;
+	}
+	UClass* Class = ResolveBuildableClass(Body->GetStringField(TEXT("class")), OutError);
+	if (!Class)
+	{
+		OutStatus = 422;
+		return nullptr;
+	}
+	// Same placement rules and 422s as the real spawn, minus the occupancy
+	// 409: previewing a miner on a node that already has one is exactly the
+	// case where the hologram's own disqualifier is the useful answer.
+	FResolvedPlacement Placement;
+	if (!ResolvePlacement(Class, Body, /*bCheckOccupied*/ false, Placement, OutStatus, OutError))
+	{
+		return nullptr;
+	}
+	double TTL = 120;
+	Body->TryGetNumberField(TEXT("ttl_seconds"), TTL);
+	TTL = FMath::Clamp(TTL, 1.0, 600.0);
+
+	// Re-previewing the same key replaces the ghost, so a re-plan after an
+	// edit moves the hologram rather than stacking a second one.
+	RemovePreview(Key);
+
+	const FVector Loc = Placement.Transform.GetLocation();
+	const double Yaw = Placement.Transform.Rotator().Yaw;
+
+	// The response when the game will not give us a hologram for this class:
+	// not an error (the preview is advisory) but an honest "could not check".
+	const auto Unavailable = [&]()
+	{
+		const TSharedPtr<FJsonObject> Json = MakeShared<FJsonObject>();
+		Json->SetStringField(TEXT("tf_id"), Key);
+		Json->SetStringField(TEXT("class"), Class->GetName());
+		Json->SetField(TEXT("valid"), MakeShared<FJsonValueNull>());
+		TArray<TSharedPtr<FJsonValue>> Reasons;
+		Reasons.Add(MakeShared<FJsonValueString>(TEXT("preview_unavailable")));
+		Json->SetArrayField(TEXT("disqualifiers"), Reasons);
+		Json->SetNumberField(TEXT("x"), Loc.X);
+		Json->SetNumberField(TEXT("y"), Loc.Y);
+		Json->SetNumberField(TEXT("z"), Loc.Z);
+		Json->SetNumberField(TEXT("yaw"), Yaw);
+		Json->SetNumberField(TEXT("expires_in"), 0);
+		OutStatus = 200;
+		return Json;
+	};
+
+	// A hologram is spawned from the recipe that builds the class, which the
+	// recipe manager can look up from the class's building descriptor. The
+	// naming-convention fallback (Build_X_C -> Recipe_X_C) covers vanilla
+	// content when the manager has nothing, e.g. before it has initialised.
+	TSubclassOf<UFGRecipe> Recipe;
+	if (AFGRecipeManager* RecipeManager = AFGRecipeManager::Get(GetWorld()))
+	{
+		if (const TSubclassOf<UFGBuildingDescriptor> Descriptor = RecipeManager->FindBuildingDescriptorByClass(Class))
+		{
+			const TArray<TSubclassOf<UFGRecipe>> Recipes = RecipeManager->FindRecipesByProduct(Descriptor, /*onlyAvailableRecipes*/ false);
+			if (Recipes.Num() > 0)
+			{
+				Recipe = Recipes[0];
+			}
+		}
+	}
+	if (!Recipe)
+	{
+		const FString Name = Class->GetName();
+		FString Ignored;
+		Recipe = ResolveRecipeClass(TEXT("Recipe_") + Name.Mid(6), Ignored); // strip "Build_"
+	}
+	if (!Recipe)
+	{
+		UE_LOG(LogSatisfactoryTerraform, Warning, TEXT("Preview: no build recipe found for %s"), *Class->GetName());
+		return Unavailable();
+	}
+
+	// Owner and instigator. A hologram normally belongs to a build gun, and
+	// some hologram classes assume theirs is one, so the local player's gun
+	// is the first choice; this subsystem (an actor) is the fallback for a
+	// session with no local player (dedicated server).
+	AActor* HologramOwner = this;
+	APawn* HologramInstigator = nullptr;
+	for (FConstPlayerControllerIterator It = GetWorld()->GetPlayerControllerIterator(); It; ++It)
+	{
+		const APlayerController* PC = It->Get();
+		AFGCharacterPlayer* Character = PC ? Cast<AFGCharacterPlayer>(PC->GetPawn()) : nullptr;
+		if (Character)
+		{
+			HologramInstigator = Character;
+			if (AFGBuildGun* BuildGun = Character->GetBuildGun())
+			{
+				HologramOwner = BuildGun;
+			}
+			break;
+		}
+	}
+	AFGHologram* Hologram = AFGHologram::SpawnHologramFromRecipe(Recipe, HologramOwner, Loc, HologramInstigator);
+	if (!Hologram && HologramOwner != this)
+	{
+		Hologram = AFGHologram::SpawnHologramFromRecipe(Recipe, this, Loc, HologramInstigator);
+	}
+	if (!Hologram)
+	{
+		UE_LOG(LogSatisfactoryTerraform, Warning, TEXT("Preview: the game returned no hologram for %s"), *Recipe->GetName());
+		return Unavailable();
+	}
+
+	// Drive the hologram the way the build gun does for one aim: a hit at the
+	// requested point (on the node actor, for extractors, so the extractor
+	// hologram snaps to it), the scroll-rotation set to the requested yaw,
+	// then pre / snap-or-place / post, then the placement check.
+	FHitResult Hit(ForceInit);
+	Hit.bBlockingHit = true;
+	Hit.Location = Loc;
+	Hit.ImpactPoint = Loc;
+	Hit.Normal = FVector::UpVector;
+	Hit.ImpactNormal = FVector::UpVector;
+	if (Placement.ResourceActor)
+	{
+		Hit.HitObjectHandle = FActorInstanceHandle(Placement.ResourceActor);
+		Hit.Component = Cast<UPrimitiveComponent>(Placement.ResourceActor->GetRootComponent());
+	}
+	Hologram->SetScrollRotateValue(FMath::RoundToInt(Yaw));
+	Hologram->PreHologramPlacement(Hit);
+	if (!Hologram->TrySnapToActor(Hit))
+	{
+		Hologram->SetHologramLocationAndRotation(Hit);
+	}
+	Hologram->PostHologramPlacement(Hit);
+	if (!Placement.ResourceActor)
+	{
+		// The API spawns at exactly the requested transform (no snapping), so
+		// the ghost - and the clearance check on it - should sit exactly
+		// there too, whatever grid the hologram would have snapped to.
+		Hologram->SetActorLocationAndRotation(Loc, FRotator(0, Yaw, 0));
+	}
+	CheckHologramPlacement(Hologram);
+	const bool bValid = Hologram->CanConstruct();
+	Hologram->SetPlacementMaterialState(bValid ? EHologramMaterialState::HMS_OK : EHologramMaterialState::HMS_ERROR);
+	Hologram->SetDisabled(false);
+	Hologram->SetActorHiddenInGame(false);
+
+	FSTFPreview Preview;
+	Preview.Hologram = Hologram;
+	Preview.Class = Class->GetName();
+	Preview.ExpiresAt = FPlatformTime::Seconds() + TTL;
+	Previews.Add(Key, Preview);
+	UE_LOG(LogSatisfactoryTerraform, Verbose, TEXT("Preview %s: %s %s"), *Key, *Class->GetName(), bValid ? TEXT("valid") : TEXT("INVALID"));
+	OutStatus = 200;
+	return PreviewToJson(Key, Preview);
+}
+
+bool ASTFApiServerSubsystem::HandlePreview(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete)
+{
+	if (!CheckRequest(Request, OnComplete))
+	{
+		return true;
+	}
+	PurgeExpiredPreviews();
+
+	if (Request.Verb == EHttpServerRequestVerbs::VERB_GET)
+	{
+		TArray<TSharedPtr<FJsonValue>> Items;
+		for (const auto& Pair : Previews)
+		{
+			Items.Add(MakeShared<FJsonValueObject>(PreviewToJson(Pair.Key, Pair.Value)));
+		}
+		OnComplete(ArrayResponse(Items));
+		return true;
+	}
+
+	if (Request.Verb == EHttpServerRequestVerbs::VERB_DELETE)
+	{
+		const int32 Removed = Previews.Num();
+		RemoveAllPreviews();
+		const TSharedPtr<FJsonObject> Json = MakeShared<FJsonObject>();
+		Json->SetNumberField(TEXT("removed"), Removed);
+		OnComplete(JsonResponse(200, Json));
+		return true;
+	}
+
+	// POST
+	const TSharedPtr<FJsonObject> Body = ParseBody(Request);
+	if (!Body.IsValid())
+	{
+		OnComplete(ErrorResponse(400, TEXT("invalid JSON")));
+		return true;
+	}
+	int32 Status = 200;
+	FString Error;
+	const TSharedPtr<FJsonObject> Result = SpawnPreview(Body, Status, Error);
+	if (!Result.IsValid())
+	{
+		OnComplete(ErrorResponse(Status, Error));
+		return true;
+	}
+	OnComplete(JsonResponse(Status, Result));
+	return true;
+}
+
+bool ASTFApiServerSubsystem::HandlePreviewByID(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete)
+{
+	if (!CheckRequest(Request, OnComplete))
+	{
+		return true;
+	}
+	// Idempotent: an already-expired preview is simply not there.
+	RemovePreview(PathID(Request));
+	OnComplete(NoContentResponse());
+	return true;
 }

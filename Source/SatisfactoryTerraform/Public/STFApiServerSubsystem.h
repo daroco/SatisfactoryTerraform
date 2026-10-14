@@ -10,6 +10,17 @@
 
 class IHttpRouter;
 class AFGBuildable;
+class AFGHologram;
+
+/** One standing preview hologram (see HandlePreview). Transient: holograms
+  * are never saved, and every entry dies with the session. */
+struct FSTFPreview
+{
+	TWeakObjectPtr<AFGHologram> Hologram;
+	FString Class;
+	/** FPlatformTime::Seconds() at which the hologram is removed. */
+	double ExpiresAt = 0;
+};
 
 /**
  * Hosts the SatisfactoryTerraform HTTP API (see api/openapi.yaml in the repo).
@@ -79,18 +90,50 @@ private:
 	bool HandleBuildableClass(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete);
 	bool HandlePlayers(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete);
 	bool HandleWorldBuildables(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete);
+	bool HandleWorldResourceNodes(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete);
 	bool HandleBuildables(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete);
 	bool HandleBuildableByID(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete);
 	bool HandleConnections(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete);
 	bool HandleConnectionByID(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete);
+	bool HandlePreview(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete);
+	bool HandlePreviewByID(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete);
 
 	// World mutations (game thread only).
 	TSharedPtr<FJsonObject> SpawnBuildable(const TSharedPtr<FJsonObject>& Body, int32& OutStatus, FString& OutError);
 	TSharedPtr<FJsonObject> PatchBuildable(AFGBuildable* Buildable, const TSharedPtr<FJsonObject>& Body, const FString& TFID, int32& OutStatus, FString& OutError);
 	TSharedPtr<FJsonObject> SpawnConnection(const TSharedPtr<FJsonObject>& Body, int32& OutStatus, FString& OutError);
+	TSharedPtr<FJsonObject> SpawnPreview(const TSharedPtr<FJsonObject>& Body, int32& OutStatus, FString& OutError);
 
 	/** Dismantle via IFGDismantleInterface if implemented, else a plain Destroy(). */
 	void DismantleBuildable(AFGBuildable* Buildable) const;
+
+	/**
+	 * The placement a POST /buildables (or /preview) body asks for, resolved
+	 * against the world: a plain transform for coordinate-placed classes, or -
+	 * for extractor classes - the world feature (resource node / water volume)
+	 * to bind to plus the transform the feature says an extractor there gets.
+	 * Shared by the real spawn and the preview so both apply identical rules.
+	 */
+	struct FResolvedPlacement
+	{
+		FTransform Transform;
+		/** Null for coordinate-placed classes. Implements IFGExtractableResourceInterface. */
+		AActor* ResourceActor = nullptr;
+		FString NodeID;
+	};
+	bool ResolvePlacement(UClass* Class, const TSharedPtr<FJsonObject>& Body, bool bCheckOccupied,
+		FResolvedPlacement& Out, int32& OutStatus, FString& OutError) const;
+
+	/** Resolve a ResourceNode.id (an actor path) to the actor, which must
+	  * implement IFGExtractableResourceInterface. nullptr + OutError otherwise. */
+	AActor* ResolveExtractableResource(const FString& Path, FString& OutError) const;
+
+	/** Standing preview holograms by key (see FSTFPreview / HandlePreview). */
+	TMap<FString, FSTFPreview> Previews;
+	FTimerHandle PreviewExpiryTimer;
+	void RemovePreview(const FString& Key);
+	void RemoveAllPreviews();
+	void PurgeExpiredPreviews();
 
 	/** Resolve a short class name like "Build_ConstructorMk1_C" to a UClass. */
 	UClass* ResolveBuildableClass(const FString& ClassName, FString& OutError) const;
