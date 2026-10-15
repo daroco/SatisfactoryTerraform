@@ -139,7 +139,7 @@ belt/wire hookup) and
 [FicsitRemoteMonitoring](https://github.com/porisius/FicsitRemoteMonitoring)
 (in-game web server patterns).
 
-## Pipelines and hypertubes (join verified live, flow not yet)
+## Pipelines and hypertubes (water flow verified live 2026-10-14)
 
 Placed by `SpawnConnection` alongside belts and wires. A pipe is spawned
 with the game's own helper,
@@ -182,9 +182,11 @@ success.
 
 ### What has not been checked
 
-- **Fluid actually moving.** The join is verified (junction -> coal generator
-  through the API, both ends connected, with the old spawn path); a full
-  extractor -> pipe -> generator run with the helper is the next live gate.
+- **Fluid moving: verified.** Water extractor -> pipe -> cross junction ->
+  pipe -> coal generator, every piece placed through the API with the
+  spline helper, and the generator ran on hand-fed coal (2026-10-14). The
+  earlier hand-rolled spawn, whose pipe end faced along the pipe, was the
+  reason typed sockets refused the join; the helper fixed it.
 - **Hypertubes** still go through the belt-style path and have never been
   placed live.
 
@@ -289,7 +291,7 @@ fallback for classes that don't implement the interface at all. Cost: no
 build-cost refund on dismantle for this class family specifically - cheap
 for a splitter/merger, and far better than a crash.
 
-## Extractors and resource nodes (not yet live-verified)
+## Extractors and resource nodes (live-verified 2026-10-14)
 
 Miners, water extractors, oil extractors and fracking buildings
 (`AFGBuildableResourceExtractorBase`) are not placed at a coordinate - they
@@ -344,7 +346,7 @@ generators) instead of manufacturers only; `recipe` stays
 manufacturer-only. A generator placed as a `satisfactory_building`
 therefore now echoes `clock_speed: 1` where it previously omitted the field.
 
-## Preview holograms (not yet live-verified)
+## Preview holograms (live-verified 2026-10-14; verdict fix pending a build)
 
 `POST /api/v1/preview` shows a would-be buildable as the game's own hologram
 and reports the hologram's placement verdict, so `terraform plan` can put the
@@ -409,3 +411,76 @@ owned by the host's build gun (or by the subsystem) reach other clients is
 a live check in a two-player session, not a certainty. If it does not,
 the fallback is to spawn the preview with no owner and
 `bOnlyRelevantToOwner` off.
+
+### Live results (2026-10-14)
+
+A `terraform plan` of `examples/tier4-factory` (666 resources, 286 of them
+placeable) put every ghost in the world in about three seconds and the
+provider read each verdict back. Two things came out of it:
+
+1. **`FGCDInitializing` never cleared**, on every hologram, on every read.
+   Root cause: a hologram starts life with that disqualifier in
+   `mConstructDisqualifiers`, and `CheckValidPlacement` only ever appends.
+   The build gun's `ValidatePlacementAndCost` calls
+   `ResetConstructDisqualifiers()` before each check; `DriveHologram` now
+   does the same. (Fix in source; the build that carries it is the first
+   thing to re-check live.)
+2. **`FGCDInvalidFloor` on every machine** is expected: the foundations
+   under them are ghosts too. The provider treats that disqualifier as
+   informational when it is the only one.
+
+Real findings the ghosts surfaced, which is the point of the feature: a
+leftover test miner occupying the node the plan wanted
+(`FGCDIdenticalOverlappingBuildable` + `FGCDNeedsResourceNode`), a water
+extractor overlapping a leftover probe (`FGCDEncroachingClearance`), and the
+first pole of each miner's pole chain sitting inside the miner
+(`FGCDInvalidPlacement`).
+
+## Session control and auto-load
+
+Tooling that drives the game through this API needs to get *out* of a
+session and back *in* without a person clicking through menus: save, quit,
+relaunch, load. Three pieces:
+
+- **`POST /api/v1/session/save`** `{name?}` writes a save through
+  `UFGSaveSystem::SaveGame`. The save system is asynchronous and reports
+  back through `FOnSaveMgrInterfaceSaveGameComplete`, so the handler parks
+  the request's `FHttpResultCallback` in `PendingSave` and answers from
+  `OnSaveComplete` (UE's HTTP server is fine with a handler that returns
+  `true` and completes later). One save in flight at a time (409 otherwise);
+  a 50 s timer answers 504 if the delegate never fires, under the provider's
+  60 s client timeout. The default name is `<session name>_terraform`
+  (`AFGGameState::GetSessionName`), validated with
+  `UFGSaveSystem::IsValidSaveName`.
+- **`POST /api/v1/session/quit`** `{save?: true, name?}` does the same
+  save, answers 202, and one second later calls
+  `FPlatformMisc::RequestExit(false)`. The delay is so the HTTP server's
+  tick writes the response before the engine tears down.
+- **Auto-load** lives in `USTFMenuWorldModule`, a root SML menu-world module,
+  because the API subsystem does not exist in the main menu. At
+  `POST_INITIALIZATION` it reads `-STFLoad=<name>` from the command line
+  or `SATISFACTORY_TERRAFORM_LOAD` from the environment, waits four seconds
+  for the menu to settle, then takes the menu's own load path: read the
+  file, `UFGSaveSystem::ParseSaveGameHeader`, `LoadSaveFile(header,
+  params, firstPlayerController)`. If any of that is unavailable it falls
+  back to `UGameplayStatics::OpenLevel(map, "?loadgame=<name>")`, the
+  option `AFGGameMode` parses itself. A static flag makes this run once per
+  process so quitting a session back to the menu does not reload it.
+
+Launching with the argument from Steam:
+`steam://run/526870//-STFLoad=<name>/`; or run `FactoryGameSteam.exe`
+directly with the environment variable set.
+
+What has not been checked: everything above is written against the headers
+and is live-tested as the first thing after the build that carries it.
+
+## Inventory grants (`POST /api/v1/players/:name/inventory`)
+
+`{item: "Desc_Coal_C", count: 100}` resolves the item descriptor class the
+same way buildable classes are resolved (loaded class, else the asset
+registry index) and adds it to the named player's `AFGCharacterPlayer`
+inventory with `UFGInventoryComponent::AddStack`, one stack of
+`UFGItemDescriptor::GetStackSize` at a time, partial adds allowed. The
+answer reports `added`, which is less than `requested` when the inventory
+fills; nothing added at all is a 409. No unlock or cost check, like every
+other write on this API.

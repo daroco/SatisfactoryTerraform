@@ -108,6 +108,29 @@ private:
 	bool HandleConnectionByID(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete);
 	bool HandlePreview(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete);
 	bool HandlePreviewByID(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete);
+	bool HandleSessionSave(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete);
+	bool HandleSessionQuit(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete);
+	bool HandlePlayerInventory(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete);
+
+	/** Session control (POST /session/save, /session/quit). The game saves
+	  * asynchronously and reports back through a delegate, so the HTTP
+	  * response is held here until it does; one save in flight at a time. */
+	struct FPendingSave
+	{
+		FHttpResultCallback OnComplete;
+		FString Name;
+		bool bQuitAfter = false;
+	};
+	TOptional<FPendingSave> PendingSave;
+	FTimerHandle SaveTimeoutTimer;
+	FTimerHandle QuitTimer;
+	/** Kick off a save; answers the request itself on any immediate refusal. */
+	void StartSave(const FString& RequestedName, bool bQuitAfter, const FHttpResultCallback& OnComplete);
+	UFUNCTION()
+	void OnSaveComplete(bool bSuccess, const FText& ErrorMessage);
+	void OnSaveTimeout();
+	/** Ask the engine to exit on the next tick, after the response has gone out. */
+	void RequestQuit();
 
 	// World mutations (game thread only).
 	TSharedPtr<FJsonObject> SpawnBuildable(const TSharedPtr<FJsonObject>& Body, int32& OutStatus, FString& OutError);

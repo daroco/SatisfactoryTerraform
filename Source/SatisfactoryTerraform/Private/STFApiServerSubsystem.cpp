@@ -45,6 +45,11 @@
 #include "FGRecipeManager.h"
 #include "FGCharacterPlayer.h"
 #include "Equipment/FGBuildGun.h"
+#include "FGSaveSystem.h"          // POST /session/save, /session/quit
+#include "FGGameState.h"           // GetSessionName (default save name)
+#include "FGInventoryComponent.h"  // POST /players/:name/inventory
+#include "Resources/FGItemDescriptor.h"
+#include "GameFramework/PlayerState.h"
 #include "EngineUtils.h"   // TActorIterator
 #include "TimerManager.h"
 #include "Buildables/FGBuildableSignBase.h"
@@ -430,6 +435,9 @@ void ASTFApiServerSubsystem::BindRoutesOnce()
 	Bind(TEXT("/api/v1/health"), EHttpServerRequestVerbs::VERB_GET, &ASTFApiServerSubsystem::HandleHealth);
 	Bind(TEXT("/api/v1/world"), EHttpServerRequestVerbs::VERB_GET, &ASTFApiServerSubsystem::HandleWorld);
 	Bind(TEXT("/api/v1/players"), EHttpServerRequestVerbs::VERB_GET, &ASTFApiServerSubsystem::HandlePlayers);
+	Bind(TEXT("/api/v1/players/:name/inventory"), EHttpServerRequestVerbs::VERB_POST, &ASTFApiServerSubsystem::HandlePlayerInventory);
+	Bind(TEXT("/api/v1/session/save"), EHttpServerRequestVerbs::VERB_POST, &ASTFApiServerSubsystem::HandleSessionSave);
+	Bind(TEXT("/api/v1/session/quit"), EHttpServerRequestVerbs::VERB_POST, &ASTFApiServerSubsystem::HandleSessionQuit);
 	Bind(TEXT("/api/v1/world/buildables"), EHttpServerRequestVerbs::VERB_GET, &ASTFApiServerSubsystem::HandleWorldBuildables);
 	Bind(TEXT("/api/v1/world/resource-nodes"), EHttpServerRequestVerbs::VERB_GET, &ASTFApiServerSubsystem::HandleWorldResourceNodes);
 	Bind(TEXT("/api/v1/preview"),
@@ -2559,6 +2567,11 @@ namespace
 		{
 			Hologram->SetActorLocationAndRotation(Preview.PinLocation, FRotator(0, Preview.PinYaw, 0));
 		}
+		// The hologram starts life with "initializing" in its disqualifier list
+		// and CheckValidPlacement only ever adds to that list; the build gun's
+		// ValidatePlacementAndCost clears it before each check. Without this
+		// reset every verdict kept "FGCDInitializing" forever - seen live.
+		Hologram->ResetConstructDisqualifiers();
 		CheckHologramPlacement(Hologram);
 		const bool bValid = Hologram->CanConstruct();
 		Hologram->SetPlacementMaterialState(bValid ? EHologramMaterialState::HMS_OK : EHologramMaterialState::HMS_ERROR);
@@ -2851,5 +2864,256 @@ bool ASTFApiServerSubsystem::HandlePreviewByID(const FHttpServerRequest& Request
 	// DELETE. Idempotent: an already-expired preview is simply not there.
 	RemovePreview(Key);
 	OnComplete(NoContentResponse());
+	return true;
+}
+
+// ---------------------------------------------------------------------------
+// Session control: save, quit. See docs/implementation-notes.md "Session
+// control and auto-load". The save system is asynchronous and reports
+// through a dynamic delegate, so these handlers answer later, from
+// OnSaveComplete, rather than inline.
+// ---------------------------------------------------------------------------
+
+bool ASTFApiServerSubsystem::HandleSessionSave(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete)
+{
+	if (!CheckRequest(Request, OnComplete))
+	{
+		return true;
+	}
+	FString Name;
+	if (Request.Body.Num() > 0)
+	{
+		const TSharedPtr<FJsonObject> Body = ParseBody(Request);
+		if (!Body.IsValid())
+		{
+			OnComplete(ErrorResponse(400, TEXT("invalid JSON")));
+			return true;
+		}
+		Body->TryGetStringField(TEXT("name"), Name);
+	}
+	StartSave(Name, /*bQuitAfter*/ false, OnComplete);
+	return true;
+}
+
+bool ASTFApiServerSubsystem::HandleSessionQuit(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete)
+{
+	if (!CheckRequest(Request, OnComplete))
+	{
+		return true;
+	}
+	bool bSave = true;
+	FString Name;
+	if (Request.Body.Num() > 0)
+	{
+		const TSharedPtr<FJsonObject> Body = ParseBody(Request);
+		if (!Body.IsValid())
+		{
+			OnComplete(ErrorResponse(400, TEXT("invalid JSON")));
+			return true;
+		}
+		Body->TryGetBoolField(TEXT("save"), bSave);
+		Body->TryGetStringField(TEXT("name"), Name);
+	}
+	if (!bSave)
+	{
+		const TSharedPtr<FJsonObject> Json = MakeShared<FJsonObject>();
+		Json->SetStringField(TEXT("saved"), TEXT(""));
+		OnComplete(JsonResponse(202, Json));
+		RequestQuit();
+		return true;
+	}
+	StartSave(Name, /*bQuitAfter*/ true, OnComplete);
+	return true;
+}
+
+void ASTFApiServerSubsystem::StartSave(const FString& RequestedName, bool bQuitAfter, const FHttpResultCallback& OnComplete)
+{
+	if (PendingSave.IsSet())
+	{
+		OnComplete(ErrorResponse(409, TEXT("a save is already in progress")));
+		return;
+	}
+	UFGSaveSystem* SaveSystem = UFGSaveSystem::Get(GetWorld());
+	if (!SaveSystem)
+	{
+		OnComplete(ErrorResponse(500, TEXT("the game's save system is unavailable")));
+		return;
+	}
+	FString Name = RequestedName.TrimStartAndEnd();
+	if (Name.IsEmpty())
+	{
+		FString Session;
+		if (const AFGGameState* GameState = GetWorld()->GetGameState<AFGGameState>())
+		{
+			Session = GameState->GetSessionName();
+		}
+		if (Session.IsEmpty())
+		{
+			Session = TEXT("session");
+		}
+		Name = Session + TEXT("_terraform");
+	}
+	if (!UFGSaveSystem::IsValidSaveName(Name))
+	{
+		OnComplete(ErrorResponse(422, FString::Printf(TEXT("'%s' is not a valid save name"), *Name)));
+		return;
+	}
+
+	FPendingSave Pending;
+	Pending.OnComplete = OnComplete;
+	Pending.Name = Name;
+	Pending.bQuitAfter = bQuitAfter;
+	PendingSave = MoveTemp(Pending);
+
+	// The provider's HTTP client gives up at 60 s; answer before it does so
+	// a hung save is reported rather than timed out silently.
+	GetWorld()->GetTimerManager().SetTimer(SaveTimeoutTimer, this, &ASTFApiServerSubsystem::OnSaveTimeout, 50.0f, false);
+
+	UE_LOG(LogSatisfactoryTerraform, Log, TEXT("Saving session as '%s'%s"), *Name, bQuitAfter ? TEXT(", then quitting") : TEXT(""));
+	FOnSaveMgrInterfaceSaveGameComplete Delegate;
+	Delegate.BindDynamic(this, &ASTFApiServerSubsystem::OnSaveComplete);
+	SaveSystem->SaveGame(Name, Delegate);
+}
+
+void ASTFApiServerSubsystem::OnSaveComplete(bool bSuccess, const FText& ErrorMessage)
+{
+	GetWorld()->GetTimerManager().ClearTimer(SaveTimeoutTimer);
+	if (!PendingSave.IsSet())
+	{
+		return; // already answered (timed out)
+	}
+	FPendingSave Save = MoveTemp(PendingSave.GetValue());
+	PendingSave.Reset();
+	if (!bSuccess)
+	{
+		UE_LOG(LogSatisfactoryTerraform, Error, TEXT("Save '%s' failed: %s"), *Save.Name, *ErrorMessage.ToString());
+		Save.OnComplete(ErrorResponse(500, FString::Printf(TEXT("save failed: %s"), *ErrorMessage.ToString())));
+		return;
+	}
+	UE_LOG(LogSatisfactoryTerraform, Log, TEXT("Saved '%s'"), *Save.Name);
+	const TSharedPtr<FJsonObject> Json = MakeShared<FJsonObject>();
+	Json->SetStringField(TEXT("saved"), Save.Name);
+	Save.OnComplete(JsonResponse(Save.bQuitAfter ? 202 : 200, Json));
+	if (Save.bQuitAfter)
+	{
+		RequestQuit();
+	}
+}
+
+void ASTFApiServerSubsystem::OnSaveTimeout()
+{
+	if (!PendingSave.IsSet())
+	{
+		return;
+	}
+	FPendingSave Save = MoveTemp(PendingSave.GetValue());
+	PendingSave.Reset();
+	UE_LOG(LogSatisfactoryTerraform, Error, TEXT("Save '%s' did not report completion within 50 s"), *Save.Name);
+	Save.OnComplete(ErrorResponse(504, TEXT("the game did not report the save finished within 50 s")));
+}
+
+void ASTFApiServerSubsystem::RequestQuit()
+{
+	// A second later, not now: the HTTP server writes the response on its own
+	// tick, and an exit requested in the same frame can beat it out the door.
+	GetWorld()->GetTimerManager().SetTimer(QuitTimer, FTimerDelegate::CreateLambda([]()
+	{
+		UE_LOG(LogSatisfactoryTerraform, Log, TEXT("Exiting on request (POST /session/quit)"));
+		FPlatformMisc::RequestExit(/*Force*/ false);
+	}), 1.0f, false);
+}
+
+// ---------------------------------------------------------------------------
+// POST /players/:name/inventory - put items into a player's inventory.
+// Creative mode by design: no unlock or cost check, like everything else
+// this API does.
+// ---------------------------------------------------------------------------
+
+bool ASTFApiServerSubsystem::HandlePlayerInventory(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete)
+{
+	if (!CheckRequest(Request, OnComplete))
+	{
+		return true;
+	}
+	const FString Name = Request.PathParams.FindRef(TEXT("name"));
+	const TSharedPtr<FJsonObject> Body = ParseBody(Request);
+	if (!Body.IsValid())
+	{
+		OnComplete(ErrorResponse(400, TEXT("invalid JSON")));
+		return true;
+	}
+	FString Item;
+	Body->TryGetStringField(TEXT("item"), Item);
+	if (Item.IsEmpty())
+	{
+		OnComplete(ErrorResponse(422, TEXT("item is required (an item descriptor class like Desc_Coal_C)")));
+		return true;
+	}
+	int32 Count = 1;
+	Body->TryGetNumberField(TEXT("count"), Count);
+	if (Count < 1 || Count > 100000)
+	{
+		OnComplete(ErrorResponse(422, TEXT("count must be between 1 and 100000")));
+		return true;
+	}
+
+	APlayerController* Found = nullptr;
+	for (FConstPlayerControllerIterator It = GetWorld()->GetPlayerControllerIterator(); It; ++It)
+	{
+		APlayerController* PC = It->Get();
+		if (PC && PC->PlayerState && PC->PlayerState->GetPlayerName() == Name)
+		{
+			Found = PC;
+			break;
+		}
+	}
+	if (!Found)
+	{
+		OnComplete(ErrorResponse(404, FString::Printf(TEXT("no player named '%s'"), *Name)));
+		return true;
+	}
+	AFGCharacterPlayer* Character = Cast<AFGCharacterPlayer>(Found->GetPawn());
+	UFGInventoryComponent* Inventory = Character ? Character->GetInventory() : nullptr;
+	if (!Inventory)
+	{
+		OnComplete(ErrorResponse(409, FString::Printf(TEXT("player '%s' has no character in the world"), *Name)));
+		return true;
+	}
+	FString Error;
+	UClass* ItemClass = ResolveClassByName(Item, UFGItemDescriptor::StaticClass(), Error);
+	if (!ItemClass)
+	{
+		OnComplete(ErrorResponse(422, Error));
+		return true;
+	}
+
+	// AddStack takes one stack at a time; split by the item's stack size so
+	// "100 coal" lands as one full stack and "500 coal" as five.
+	const int32 StackSize = FMath::Max(1, UFGItemDescriptor::GetStackSize(ItemClass));
+	int32 Remaining = Count;
+	int32 Added = 0;
+	while (Remaining > 0)
+	{
+		const int32 Chunk = FMath::Min(Remaining, StackSize);
+		const int32 Put = Inventory->AddStack(FInventoryStack(Chunk, TSubclassOf<UFGItemDescriptor>(ItemClass)), /*allowPartialAdd*/ true);
+		if (Put <= 0)
+		{
+			break;
+		}
+		Added += Put;
+		Remaining -= Put;
+	}
+	if (Added == 0)
+	{
+		OnComplete(ErrorResponse(409, FString::Printf(TEXT("%s's inventory is full"), *Name)));
+		return true;
+	}
+	UE_LOG(LogSatisfactoryTerraform, Log, TEXT("Gave %s %d x %s (%d requested)"), *Name, Added, *Item, Count);
+	const TSharedPtr<FJsonObject> Json = MakeShared<FJsonObject>();
+	Json->SetStringField(TEXT("player"), Name);
+	Json->SetStringField(TEXT("item"), Item);
+	Json->SetNumberField(TEXT("requested"), Count);
+	Json->SetNumberField(TEXT("added"), Added);
+	OnComplete(JsonResponse(200, Json));
 	return true;
 }

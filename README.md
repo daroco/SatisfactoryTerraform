@@ -61,6 +61,13 @@ Requires [Satisfactory Mod Loader (SML)](https://ficsit.app/mod/SML) 3.11+.
    constructor, a belt, and a power line). Identity is a provider-generated
    `tf_id`, persisted in your save, so plans stay clean across save/load.
 
+4. Hands-free loop for tooling: `POST /api/v1/session/save` writes a save
+   and answers when it is on disk; `POST /api/v1/session/quit` saves and
+   exits the game; launching with `-STFLoad=<save name>` (or the environment
+   variable `SATISFACTORY_TERRAFORM_LOAD`) loads that save from the main
+   menu without a click. `POST /api/v1/players/<name>/inventory` with
+   `{"item":"Desc_Coal_C","count":100}` puts items in a player's hands.
+
 ## How it works
 
 ```mermaid
